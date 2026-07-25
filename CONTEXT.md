@@ -71,6 +71,13 @@ content still discloses it to the local device and its administrator or
 extensions.
 _Avoid_: Offline Vault, IndexedDB note cache, protection from a compromised browser
 
+**Constrained rich editor**:
+The primary note editor, which directly edits rich blocks only for constructs
+that round-trip reliably through the versioned Markdown Profile. Unsupported
+content remains preserved through an opaque representation or Raw Markdown
+escape hatch rather than being normalized or silently deleted.
+_Avoid_: Split preview, source-first editor, unrestricted WYSIWYG, lossy rich text
+
 **Passive attachment**:
 A Vault attachment treated strictly as user-controlled data rather than
 application code. Safe raster images, audio, video, and PDF may render inline;
@@ -195,6 +202,13 @@ _Avoid_: Passphrase as content key, global Vault key, vendor recovery key, recov
 The default creation path that initializes a new Git repository directly on the trusted server, writes its Vault Manifest and Core Model or selected Preset, and creates an initial commit without requiring any remote. A Remote Backup Target may be attached later; cloning a remote is an import or restore path, not the definition of creating a Vault.
 _Avoid_: Mandatory GitHub repository, remote-first workspace, browser-side git init
 
+**Vault bootstrap**:
+The operator-invoked initialization of an empty local Git repository as a valid
+Vault before the service opens it. Bootstrap writes the canonical Vault
+Manifest and Core Model and creates the initial history boundary; it neither
+migrates arbitrary content nor registers an existing canonical Vault.
+_Avoid_: Handwritten Vault skeleton, Vault import, content migration, Web creation flow
+
 **Vault restore**:
 Registering and reconstructing the same logical Vault from its canonical
 repository while preserving its Vault identity, configuration, and Git history.
@@ -273,6 +287,12 @@ _Avoid_: Git conflict, silent overwrite, forced save, CRDT
 **Managed repository access**:
 The deployment boundary in which the Vault Service account is the sole ordinary writer to a running Vault worktree. Humans and tools may read it directly, but live writes use revision-aware API or companion CLI operations. Raw filesystem edits are normal only while the service is stopped and are imported by a startup scan; mutations detected while running are treated as an exceptional recovery event that pauses writes and requires reconciliation. Administrators who grant other processes write permission explicitly bypass this guarantee.
 _Avoid_: Shared writable sync folder, watcher as concurrency protocol, ambient shell write access
+
+**Physical placement**:
+The mutable repository path of a Durable Object, used for readable storage
+rather than knowledge semantics. Moving a file does not change its identity,
+type, lifecycle, relationships, or membership in derived views.
+_Avoid_: Folder taxonomy, path identity, collection membership, object type
 
 **Data-only repository**:
 The rule that Markdown, attachments, Git metadata, and imported repository

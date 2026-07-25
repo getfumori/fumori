@@ -39,6 +39,23 @@ Paths in this list are relative to the source repository. When an exact
 historical answer is needed, read the artifact from the baseline commit rather
 than relying on a later working-tree version.
 
+## Current implementation authority
+
+Routine implementation planning no longer depends on reading the source
+repository:
+
+1. [`CONTEXT.md`](../CONTEXT.md) is the living domain glossary.
+2. [`docs/architecture/accepted-baseline.md`](architecture/accepted-baseline.md)
+   is the implementation-facing digest of accepted decisions 01–13.
+3. [`docs/product/foundation-release.md`](product/foundation-release.md) is the
+   accepted release overlay for the decisions previously deferred by research
+   tickets 14–15.
+4. [`docs/adr/`](adr/) records later decisions that override or refine the
+   baseline.
+
+The source repository remains historical evidence for auditing an exact
+research trail. It is not an active planning dependency or issue tracker.
+
 ## Transfer boundary
 
 - The source Wayfinder tickets remain research history. They are not copied
@@ -46,9 +63,10 @@ than relying on a later working-tree version.
 - The frozen UI shell is research evidence only and is not production code.
 - Accepted architecture remains the default unless a concrete implementation
   constraint requires reopening a decision.
-- First-release scope, responsive information architecture, import scope, and
-  measurable acceptance seams remain intentionally deferred for the new
-  repository's product-design session.
+- First-release scope, desktop information architecture, import scope, and
+  measurable acceptance seams were resolved in this repository and are
+  recorded in
+  [`docs/product/foundation-release.md`](product/foundation-release.md).
 
 The Fumori product name and logo direction were accepted after the baseline
 commit and were transferred through the accompanying implementation handoff.
