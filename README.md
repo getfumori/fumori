@@ -27,7 +27,7 @@ implementation spec or backlog is created.
 - [`docs/brand/`](docs/brand/) contains brand references. The current image is
   a raster concept, not a production logo.
 - [`docs/agents/`](docs/agents/) defines the repository's agent workflow,
-  local Markdown issue tracker, triage vocabulary, and domain-doc conventions.
+  GitHub issue tracker, triage vocabulary, and domain-doc conventions.
 
 ## License
 

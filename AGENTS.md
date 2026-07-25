@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues and specs are tracked as local Markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
+Issues and specs are tracked in GitHub Issues for `getfumori/fumori` using the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

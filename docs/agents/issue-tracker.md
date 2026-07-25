@@ -1,30 +1,52 @@
-# Issue tracker: Local Markdown
+# Issue tracker: GitHub
 
-Issues and specs for this repository live as Markdown files in `.scratch/`.
+Issues and specs for this repository live as GitHub issues. Use the `gh` CLI
+for all operations.
+
+## Repository
+
+- GitHub repository: `getfumori/fumori`
+- Infer the repository from `git remote -v` when commands run inside this
+  clone.
 
 ## Conventions
 
-- One feature per directory: `.scratch/<feature-slug>/`
-- The spec is `.scratch/<feature-slug>/spec.md`
-- Implementation issues are one file per ticket at
-  `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`
-- Triage state is recorded as a `Status:` line near the top of each issue
-- Comments and conversation history are appended under a `## Comments` heading
+- Create: `gh issue create --title "..." --body "..."`
+- Read: `gh issue view <number> --comments`
+- List:
+  `gh issue list --state open --json number,title,body,labels,comments`
+- Comment: `gh issue comment <number> --body "..."`
+- Apply or remove labels with `gh issue edit`
+- Close: `gh issue close <number> --comment "..."`
+
+Use a heredoc for multi-line issue bodies.
+
+## Pull requests as a triage surface
+
+**PRs as a request surface: no.**
+
+GitHub shares one number space across issues and pull requests. Resolve an
+ambiguous reference with `gh pr view <number>` and fall back to
+`gh issue view <number>`.
 
 ## Publishing and fetching
 
-When a skill says to publish to the issue tracker, create the appropriate file
-under `.scratch/<feature-slug>/`.
+When a skill says to publish to the issue tracker, create a GitHub issue.
 
-When a skill says to fetch a ticket, read the referenced Markdown file.
+When a skill says to fetch the relevant ticket, run:
+
+`gh issue view <number> --comments`
 
 ## Wayfinding operations
 
-Wayfinder uses `.scratch/<effort>/map.md` with one child file per ticket under
-`.scratch/<effort>/issues/`.
+Wayfinder uses one issue labelled `wayfinder:map`, with child issues as
+tickets.
 
-- Each child records `Type:`, `Status:`, and `Blocked by:` fields.
-- The frontier is the first numbered open, unblocked, and unclaimed ticket.
-- Claim work by setting `Status: claimed` before beginning.
-- Resolve work by appending an `## Answer`, setting `Status: resolved`, and
-  adding a context pointer to the map.
+- Link children using GitHub sub-issues when available.
+- Represent blockers with GitHub native issue dependencies.
+- If native relationships are unavailable, use task lists and a `Blocked by:`
+  line.
+- The frontier is the first open child without an open blocker or assignee.
+- Claim a ticket with `gh issue edit <number> --add-assignee @me`.
+- Resolve it by commenting with the answer, closing it, and appending a context
+  pointer to the map.
