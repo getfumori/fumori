@@ -69,7 +69,9 @@ describe("fumori vault bootstrap", () => {
         join(repository, ".second-brain/model/lifecycle.md"),
         "utf8"
       )
-    ).toContain("states:\n  - captured\n  - organized\n  - archived");
+    ).toContain(
+      "states:\n  - captured\n  - organized\n  - archived\narchived_state: archived"
+    );
     expect(
       await readFile(
         join(repository, ".second-brain/model/views/inbox.md"),

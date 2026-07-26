@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { serve, type ServerType } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 
 import { appConfigSchema } from "../contracts/app-config.js";
 import {
@@ -14,14 +14,26 @@ import {
   saveDailyNoteRequestSchema,
   staleDailyNoteResponseSchema
 } from "../contracts/daily-note.js";
+import {
+  createHumanNoteRequestSchema,
+  humanNoteListResponseSchema,
+  humanNoteResponseSchema,
+  saveHumanNoteRequestSchema
+} from "../contracts/human-note.js";
+import {
+  searchQuerySchema,
+  searchResponseSchema
+} from "../contracts/search.js";
 import { todayResponseSchema } from "../contracts/today.js";
 import {
-  DailyNotes,
   ExplicitDailyNoteCreationRequiredError,
+  HumanNoteNotFoundError,
   InvalidDailyNoteMarkdownError,
-  StaleDailyNoteRevisionError
-} from "../vault/daily-notes.js";
-import { openVault } from "../vault/open.js";
+  InvalidHumanNoteMarkdownError,
+  StaleDailyNoteRevisionError,
+  StaleHumanNoteRevisionError
+} from "../vault/vault-module.js";
+import { VaultModule } from "../vault/vault-module.js";
 
 type ServerOptions = {
   vault: string;
@@ -51,11 +63,21 @@ export async function startServer(
   options: ServerOptions,
   onListening?: (info: ListeningInfo) => void
 ): Promise<ServerType> {
-  const vault = await openVault(options.vault);
+  const vault = await VaultModule.open(options.vault, todayDate);
   const webRoot = fileURLToPath(new URL("../web", import.meta.url));
   const indexPath = fileURLToPath(new URL("../web/index.html", import.meta.url));
-  const dailyNotes = new DailyNotes(vault.path, todayDate);
   const app = new Hono();
+  const serveWebApp = async (context: Context) => {
+    const index = await readFile(indexPath, "utf8").catch(() => undefined);
+    if (!index) {
+      return context.text(
+        "Fumori Web assets are missing. Reinstall the package.",
+        500
+      );
+    }
+    context.header("Cache-Control", "no-store");
+    return context.html(index);
+  };
 
   app.get("/", (context) => context.redirect("/today"));
   app.get("/api/v1/config", (context) => {
@@ -71,36 +93,39 @@ export async function startServer(
   });
   app.get("/api/v1/today", async (context) => {
     context.header("Cache-Control", "no-store");
-    const dailyNote = await dailyNotes.read(todayDate());
+    const dailyNote = await vault.readDailyNote(todayDate());
     return context.json(
       todayResponseSchema.parse({
         ...dailyNote,
         vault: {
-          id: vault.id,
-          name: vault.name
+          id: vault.identity.id,
+          name: vault.identity.name
         }
       })
     );
   });
   app.get("/api/v1/daily/:date", async (context) => {
     context.header("Cache-Control", "no-store");
-    const dailyNote = await dailyNotes.read(context.req.param("date"));
+    const dailyNote = await vault.readDailyNote(context.req.param("date"));
     return context.json(
       dailyNoteResponseSchema.parse({
         ...dailyNote,
-        vault: { id: vault.id, name: vault.name }
+        vault: vault.identity
       })
     );
   });
   app.put("/api/v1/daily/:date", async (context) => {
     const input = saveDailyNoteRequestSchema.parse(await context.req.json());
     try {
-      const dailyNote = await dailyNotes.save(context.req.param("date"), input);
+      const dailyNote = await vault.saveDailyNote(
+        context.req.param("date"),
+        input
+      );
       context.header("Cache-Control", "no-store");
       return context.json(
         dailyNoteResponseSchema.parse({
           ...dailyNote,
-          vault: { id: vault.id, name: vault.name }
+          vault: vault.identity
         })
       );
     } catch (error) {
@@ -137,15 +162,94 @@ export async function startServer(
     }
   });
   app.post("/api/v1/daily/:date", async (context) => {
-    const result = await dailyNotes.create(context.req.param("date"));
+    const result = await vault.createDailyNote(context.req.param("date"));
     context.header("Cache-Control", "no-store");
     return context.json(
       dailyNoteResponseSchema.parse({
         ...result.note,
-        vault: { id: vault.id, name: vault.name }
+        vault: vault.identity
       }),
       result.created ? 201 : 200
     );
+  });
+  app.get("/api/v1/notes", (context) => {
+    context.header("Cache-Control", "no-store");
+    return context.json(
+      humanNoteListResponseSchema.parse(vault.humanNoteLists().notes)
+    );
+  });
+  app.post("/api/v1/notes", async (context) => {
+    createHumanNoteRequestSchema.parse(await context.req.json());
+    const note = await vault.createHumanNote();
+    context.header("Cache-Control", "no-store");
+    return context.json(
+      humanNoteResponseSchema.parse({
+        ...note,
+        vault: vault.identity
+      }),
+      201
+    );
+  });
+  app.get("/api/v1/notes/:id", (context) => {
+    const note = vault.humanNote(context.req.param("id"));
+    if (!note) {
+      return context.json({ error: "not_found" }, 404);
+    }
+    context.header("Cache-Control", "no-store");
+    return context.json(
+      humanNoteResponseSchema.parse({
+        ...note,
+        vault: vault.identity
+      })
+    );
+  });
+  app.put("/api/v1/notes/:id", async (context) => {
+    const input = saveHumanNoteRequestSchema.parse(await context.req.json());
+    try {
+      const note = await vault.saveHumanNote(context.req.param("id"), input);
+      context.header("Cache-Control", "no-store");
+      return context.json(
+        humanNoteResponseSchema.parse({
+          ...note,
+          vault: vault.identity
+        })
+      );
+    } catch (error) {
+      context.header("Cache-Control", "no-store");
+      if (error instanceof HumanNoteNotFoundError) {
+        return context.json({ error: "not_found" }, 404);
+      }
+      if (error instanceof StaleHumanNoteRevisionError) {
+        return context.json(
+          {
+            error: "stale_revision",
+            currentRevision: error.currentRevision
+          },
+          409
+        );
+      }
+      if (error instanceof InvalidHumanNoteMarkdownError) {
+        return context.json(
+          {
+            error: "invalid_canonical_markdown",
+            message: error.message
+          },
+          422
+        );
+      }
+      throw error;
+    }
+  });
+  app.get("/api/v1/inbox", (context) => {
+    context.header("Cache-Control", "no-store");
+    return context.json(
+      humanNoteListResponseSchema.parse(vault.humanNoteLists().inbox)
+    );
+  });
+  app.get("/api/v1/search", (context) => {
+    const query = searchQuerySchema.parse(context.req.query("q"));
+    context.header("Cache-Control", "no-store");
+    return context.json(searchResponseSchema.parse(vault.search(query)));
   });
   app.get(
     "/assets/*",
@@ -156,22 +260,12 @@ export async function startServer(
       }
     })
   );
-  app.get("/today", async (context) => {
-    const index = await readFile(indexPath, "utf8").catch(() => undefined);
-    if (!index) {
-      return context.text("Fumori Web assets are missing. Reinstall the package.", 500);
-    }
-    context.header("Cache-Control", "no-store");
-    return context.html(index);
-  });
-  app.get("/daily/:date", async (context) => {
-    const index = await readFile(indexPath, "utf8").catch(() => undefined);
-    if (!index) {
-      return context.text("Fumori Web assets are missing. Reinstall the package.", 500);
-    }
-    context.header("Cache-Control", "no-store");
-    return context.html(index);
-  });
+  app.get("/today", serveWebApp);
+  app.get("/daily/:date", serveWebApp);
+  app.get("/notes", serveWebApp);
+  app.get("/notes/:id", serveWebApp);
+  app.get("/inbox", serveWebApp);
+  app.get("/search", serveWebApp);
 
   if (!isLoopback(options.host)) {
     process.stderr.write(

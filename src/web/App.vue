@@ -14,6 +14,9 @@ import {
   type DailyNoteResponse,
   dailyNoteResponseSchema
 } from "../contracts/daily-note";
+import { humanNoteResponseSchema } from "../contracts/human-note";
+import KnowledgeApp from "./KnowledgeApp.vue";
+import PrimarySidebar from "./PrimarySidebar.vue";
 import RawMarkdownEditor from "./RawMarkdownEditor.vue";
 import RichMarkdownEditor from "./RichMarkdownEditor.vue";
 import {
@@ -31,7 +34,9 @@ const routeMatch = window.location.pathname.match(
   /^\/daily\/(\d{4}-\d{2}-\d{2})$/
 );
 const historicalDate = routeMatch?.[1];
-const isTodayRoute = historicalDate === undefined;
+const isTodayRoute =
+  window.location.pathname === "/" || window.location.pathname === "/today";
+const isDailyView = isTodayRoute || historicalDate !== undefined;
 
 const config = ref<AppConfig>();
 const note = ref<DailyNoteResponse>();
@@ -257,12 +262,35 @@ async function switchToRich(): Promise<void> {
 
 async function navigate(event: MouseEvent, destination: string): Promise<void> {
   event.preventDefault();
+  await navigateTo(destination);
+}
+
+async function navigateTo(destination: string): Promise<void> {
   try {
     await autosave.value?.flush();
   } catch {
     return;
   }
   window.location.assign(destination);
+}
+
+async function createStandaloneNote(): Promise<void> {
+  try {
+    await autosave.value?.flush();
+    const response = await fetch("/api/v1/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ context: "global" })
+    });
+    if (!response.ok) {
+      throw new Error(`Create failed (${response.status})`);
+    }
+    const created = humanNoteResponseSchema.parse(await response.json());
+    window.location.assign(`/notes/${created.id}`);
+  } catch (reason) {
+    saveError.value = explainError(reason, "The note could not be created.");
+    saveStatus.value = "error";
+  }
 }
 
 async function flushNow(): Promise<void> {
@@ -277,6 +305,10 @@ function handleKeydown(event: KeyboardEvent): void {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
     void flushNow();
+  }
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    void navigateTo("/search");
   }
 }
 
@@ -300,6 +332,9 @@ function handleBeforeUnload(event: BeforeUnloadEvent): void {
 }
 
 onMounted(async () => {
+  if (!isDailyView) {
+    return;
+  }
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("pagehide", flushForPageExit);
   window.addEventListener("beforeunload", handleBeforeUnload);
@@ -308,6 +343,9 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  if (!isDailyView) {
+    return;
+  }
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("pagehide", flushForPageExit);
   window.removeEventListener("beforeunload", handleBeforeUnload);
@@ -317,75 +355,18 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <KnowledgeApp v-if="!isDailyView" />
   <main
+    v-else
     class="app-shell"
     :data-app-ready="note !== undefined || fatalError !== undefined"
   >
-    <aside class="primary-zone" data-zone="primary">
-      <div class="brand">
-        <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 32 32" role="img">
-            <path d="M8 24V8h15l-3.2 4H13v3h6l-3 4h-3v5H8Z" />
-            <path d="M17 8c4-3 8-2 9-2-1 4-3 7-8 7" class="brand-leaf" />
-          </svg>
-        </span>
-        <span>
-          <strong>Fumori</strong>
-          <small>{{ note?.vault.name ?? "Opening Vault" }}</small>
-        </span>
-      </div>
-
-      <nav aria-label="Primary" class="primary-nav">
-        <a
-          class="nav-item active"
-          href="/today"
-          :aria-current="isTodayRoute ? 'page' : undefined"
-          @click="navigate($event, '/today')"
-        >
-          <span class="nav-glyph today-glyph" aria-hidden="true"></span>
-          Today
-        </a>
-        <a class="nav-item" href="#notes" @click="navigate($event, '#notes')">
-          <span class="nav-glyph note-glyph" aria-hidden="true"></span>
-          Notes
-        </a>
-        <a class="nav-item" href="#inbox" @click="navigate($event, '#inbox')">
-          <span class="nav-glyph inbox-glyph" aria-hidden="true"></span>
-          Inbox
-        </a>
-        <a class="nav-item" href="#types" @click="navigate($event, '#types')">
-          <span class="nav-glyph types-glyph" aria-hidden="true"></span>
-          Types
-        </a>
-        <a class="nav-item" href="#views" @click="navigate($event, '#views')">
-          <span class="nav-glyph views-glyph" aria-hidden="true"></span>
-          Views
-        </a>
-        <a
-          class="nav-item"
-          href="#archive"
-          @click="navigate($event, '#archive')"
-        >
-          <span class="nav-glyph archive-glyph" aria-hidden="true"></span>
-          Archive
-        </a>
-      </nav>
-
-      <div class="primary-footer">
-        <button class="search-button" type="button" aria-label="Search">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="10.5" cy="10.5" r="5.8" />
-            <path d="m15 15 4.2 4.2" />
-          </svg>
-          <span>Search</span>
-          <kbd>⌘ K</kbd>
-        </button>
-        <div class="local-status">
-          <span aria-hidden="true"></span>
-          Local Vault
-        </div>
-      </div>
-    </aside>
+    <PrimarySidebar
+      :vault-name="note?.vault.name"
+      active="today"
+      @navigate="navigateTo"
+      @create="createStandaloneNote"
+    />
 
     <section
       class="context-zone"

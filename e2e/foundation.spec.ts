@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -303,6 +303,9 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
     await expect
       .poll(() => readFile(dailyPath, "utf8"), { timeout: 1_000 })
       .toContain("Primary navigation flush survives.");
+    await page.goBack();
+    await expect(page).toHaveURL(`${url}/today`);
+    await expect(editor).toBeVisible();
 
     await editor.click();
     await page.keyboard.press("Control+End");
@@ -510,6 +513,87 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
     await expect(readFile(historicalPath, "utf8")).resolves.toContain(
       `# ${historicalDate}`
     );
+
+    await page.goto(`${rawRestartedUrl}/notes`);
+    await expect(page).toHaveTitle("Notes — Fumori");
+    await expect(page.getByRole("heading", { name: "Notes", level: 2 })).toBeVisible();
+    await page
+      .locator("[data-zone='primary']")
+      .getByRole("button", { name: "New note" })
+      .evaluate((button: HTMLButtonElement) => button.click());
+    await expect(page).toHaveURL(/\/notes\/[0-9a-f-]{36}$/);
+    const firstStandaloneUrl = page.url();
+    const standaloneEditor = page
+      .getByTestId("rich-editor")
+      .locator("[contenteditable='true']");
+    await standaloneEditor.fill(
+      "# Lantern Archive\n\nThe winter signal waits beside the cedar."
+    );
+    await page.keyboard.press("Control+s");
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+    await expect
+      .poll(async () =>
+        (await readdir(join(vault, "human", "notes"))).includes(
+          "lantern-archive.md"
+        )
+      )
+      .toBe(true);
+    const standalonePath = join(
+      vault,
+      "human",
+      "notes",
+      "lantern-archive.md"
+    );
+    await expect
+      .poll(() => readFile(standalonePath, "utf8"))
+      .toContain("The winter signal waits beside the cedar.");
+    await page.reload();
+    await expect(standaloneEditor).toContainText("Lantern Archive");
+
+    const secondTab = await context.newPage();
+    await secondTab.goto(firstStandaloneUrl);
+    await expect(
+      secondTab.getByTestId("rich-editor").getByText("Lantern Archive")
+    ).toBeVisible();
+    await secondTab.close();
+
+    await page.getByRole("link", { name: "Notes", exact: true }).click();
+    await expect(page).toHaveURL(`${rawRestartedUrl}/notes`);
+    await page.goBack();
+    await expect(page).toHaveURL(firstStandaloneUrl);
+    await page.goForward();
+    await expect(page).toHaveURL(`${rawRestartedUrl}/notes`);
+    await expect(page.getByRole("link", { name: "Lantern Archive" })).toBeVisible();
+
+    await page.getByRole("link", { name: "Inbox", exact: true }).click();
+    await expect(page).toHaveURL(`${rawRestartedUrl}/inbox`);
+    await expect(page.getByRole("link", { name: "Lantern Archive" })).toBeVisible();
+    await page
+      .getByRole("button", { name: "Capture note" })
+      .evaluate((button: HTMLButtonElement) => button.click());
+    await expect(page).toHaveURL(/\/notes\/[0-9a-f-]{36}$/);
+    await page
+      .getByTestId("rich-editor")
+      .locator("[contenteditable='true']")
+      .fill("# Inbox Seed\n\nCaptured from Inbox.");
+    await page.keyboard.press("Control+s");
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+
+    await page.keyboard.press("Control+k");
+    await expect(page).toHaveURL(`${rawRestartedUrl}/search`);
+    const search = page.getByRole("searchbox", { name: "Search notes" });
+    await search.fill("winter signal");
+    await expect(page.getByRole("link", { name: "Lantern Archive" })).toContainText(
+      "winter signal"
+    );
+    await page.getByRole("link", { name: "Lantern Archive" }).click();
+    await expect(page).toHaveURL(firstStandaloneUrl);
+
+    await page.keyboard.press("Control+k");
+    await search.fill("Raw edit survives");
+    await expect(
+      page.getByRole("link", { name: todayPayload.date })
+    ).toContainText("Raw edit survives");
     await context.close();
   } finally {
     if (server) {

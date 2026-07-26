@@ -1,9 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  open,
-  readFile,
-  rename,
-  rm
+  readFile
 } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -12,6 +9,7 @@ import { z } from "zod";
 
 import { dailyNoteDateSchema } from "../contracts/daily-note-date.js";
 import type { SaveDailyNoteRequest } from "../contracts/daily-note.js";
+import { atomicReplace } from "./atomic-publication.js";
 
 type DailyNoteMetadata = {
   id: string;
@@ -176,32 +174,23 @@ date: ${metadata.date}
 ${body}`;
 }
 
-async function atomicReplace(path: string, source: string): Promise<void> {
-  const temporaryPath = `${path}.fumori-${randomUUID()}.tmp`;
-  let handle;
-  try {
-    handle = await open(temporaryPath, "wx", 0o600);
-    await handle.writeFile(source, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporaryPath, path);
-  } catch (error) {
-    await handle?.close();
-    await rm(temporaryPath, { force: true });
-    throw error;
-  }
-}
-
 export class DailyNotes {
   readonly #dailyDirectory: string;
   readonly #today: () => string;
   readonly #writeTails = new Map<string, Promise<void>>();
   readonly #virtualMetadata = new Map<string, DailyNoteMetadata>();
+  readonly #onPublication:
+    | ((note: DailyNoteSnapshot) => void)
+    | undefined;
 
-  constructor(vaultPath: string, today: () => string) {
+  constructor(
+    vaultPath: string,
+    today: () => string,
+    onPublication?: (note: DailyNoteSnapshot) => void
+  ) {
     this.#dailyDirectory = join(vaultPath, "human", "daily");
     this.#today = today;
+    this.#onPublication = onPublication;
   }
 
   async read(dateInput: string): Promise<DailyNoteSnapshot> {
@@ -273,14 +262,18 @@ export class DailyNotes {
         }
         await atomicReplace(path, input.sourceMarkdown);
         this.#virtualMetadata.delete(date);
-        return this.read(date);
+        const saved = await this.read(date);
+        this.#onPublication?.(saved);
+        return saved;
       }
       const metadata = current.exists
         ? decodeDailyNote(await readFile(path, "utf8"), date).metadata
         : this.#metadataForMissing(date);
       await atomicReplace(path, encodeDailyNote(metadata, input.bodyMarkdown));
       this.#virtualMetadata.delete(date);
-      return this.read(date);
+      const saved = await this.read(date);
+      this.#onPublication?.(saved);
+      return saved;
     });
   }
 
@@ -302,7 +295,9 @@ export class DailyNotes {
         )
       );
       this.#virtualMetadata.delete(date);
-      return { created: true, note: await this.read(date) };
+      const note = await this.read(date);
+      this.#onPublication?.(note);
+      return { created: true, note };
     });
   }
 

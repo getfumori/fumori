@@ -6,6 +6,7 @@ import { createFoundationMarkdownExtensions } from "./foundation-markdown";
 
 const props = defineProps<{
   modelValue: string;
+  ariaLabel?: string;
 }>();
 
 const emit = defineEmits<{
@@ -18,7 +19,7 @@ const editor = useEditor({
   contentType: "markdown",
   editorProps: {
     attributes: {
-      "aria-label": "Daily Note editor",
+      "aria-label": props.ariaLabel ?? "Daily Note editor",
       spellcheck: "true"
     }
   },

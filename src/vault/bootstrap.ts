@@ -111,6 +111,7 @@ states:
   - captured
   - organized
   - archived
+archived_state: archived
 ---
 
 # Knowledge lifecycle
