@@ -5,7 +5,24 @@ export type AutosaveClock = {
 
 export type AutosaveDraft =
   | { format: "rich"; bodyMarkdown: string }
-  | { format: "raw"; sourceMarkdown: string };
+  | { format: "raw"; sourceMarkdown: string }
+  | {
+      format: "metadata";
+      type: string | null;
+      state: string;
+      tags: string[];
+      aliases: string[];
+      properties: Record<string, string | number | boolean | string[]>;
+    }
+  | {
+      format: "document";
+      bodyMarkdown: string;
+      type: string | null;
+      state: string;
+      tags: string[];
+      aliases: string[];
+      properties: Record<string, string | number | boolean | string[]>;
+    };
 
 type SaveInput = {
   baseRevision: string | null;

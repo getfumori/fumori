@@ -1,11 +1,14 @@
-import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
-
 import type {
   HumanNoteListItem,
   HumanNoteResponse
 } from "../contracts/human-note.js";
+import type {
+  OrganizationModelValue,
+  QueryFilter,
+  QueryPredicate,
+  QuerySpec,
+  StructuredNoteItem
+} from "../contracts/organization-model.js";
 import type { SearchResult } from "../contracts/search.js";
 import type { DailyNoteSnapshot } from "./daily-notes.js";
 
@@ -44,10 +47,39 @@ export class InMemoryProjection {
     );
     return {
       notes: active.map(toListItem),
-      inbox: active
-        .filter((note) => note.state === this.#inboxState)
-        .map(toListItem)
+      inbox: this.queryHumanNotes({
+        filter: {
+          all: [
+            { field: "kind", operator: "equals", value: "standalone" },
+            { field: "state", operator: "equals", value: this.#inboxState }
+          ]
+        }
+      }).map(toListItem)
     };
+  }
+
+  queryHumanNotes(query: QuerySpec): StructuredNoteItem[] {
+    const matching = [
+      ...this.#humanNotes.values(),
+      ...this.#dailyNotes.values()
+    ].filter(
+      (note) => !query.filter || matchesFilter(note, query.filter)
+    );
+    if (query.order) {
+      matching.sort((left, right) => {
+        for (const order of query.order ?? []) {
+          const comparison = compareValues(
+            projectedField(left, order.field),
+            projectedField(right, order.field)
+          );
+          if (comparison !== 0) {
+            return order.direction === "ascending" ? comparison : -comparison;
+          }
+        }
+        return 0;
+      });
+    }
+    return matching.map(toStructuredItem);
   }
 
   publishDailyNote(note: DailyNoteSnapshot): void {
@@ -61,41 +93,20 @@ export class InMemoryProjection {
     this.#dailyNotes.set(note.date, {
       kind: "daily-note",
       id,
+      created:
+        note.sourceMarkdown.match(/^_created:\s*(.+?)\s*$/m)?.[1] ?? "",
       title: note.date,
       canonicalPath: `human/daily/${note.date}.md`,
       url: `/daily/${note.date}`,
       revision: note.revision,
       bodyMarkdown: note.bodyMarkdown,
-      sourceMarkdown: note.sourceMarkdown
+      sourceMarkdown: note.sourceMarkdown,
+      type: note.type,
+      state: note.state,
+      tags: note.tags,
+      aliases: note.aliases,
+      properties: note.properties
     });
-  }
-
-  async rebuildDailyNotes(vaultPath: string): Promise<void> {
-    const directory = join(vaultPath, "human", "daily");
-    for (const filename of await readdir(directory)) {
-      const match = filename.match(/^(\d{4}-\d{2}-\d{2})\.md$/);
-      if (!match?.[1]) {
-        continue;
-      }
-      const date = match[1];
-      const sourceMarkdown = await readFile(join(directory, filename), "utf8");
-      const heading = `# ${date}\n`;
-      const headingStart = sourceMarkdown.indexOf(heading);
-      if (headingStart < 0) {
-        throw new Error(`Daily Note is missing its date heading: ${filename}`);
-      }
-      const bodyMarkdown = sourceMarkdown
-        .slice(headingStart + heading.length)
-        .replace(/^\n/, "")
-        .replace(/\n$/, "");
-      this.publishDailyNote({
-        date,
-        exists: true,
-        revision: createHash("sha256").update(sourceMarkdown).digest("hex"),
-        bodyMarkdown,
-        sourceMarkdown
-      });
-    }
   }
 
   search(query: string): SearchResult[] {
@@ -131,15 +142,26 @@ export class InMemoryProjection {
 type ProjectedDailyNote = {
   kind: "daily-note";
   id: string;
+  created: string;
   title: string;
   canonicalPath: string;
   url: string;
   revision: string;
   bodyMarkdown: string;
   sourceMarkdown: string;
+  type: "daily-note";
+  state: string;
+  tags: string[];
+  aliases: string[];
+  properties: Record<string, OrganizationModelValue>;
 };
 
-function toListItem(note: ProjectedHumanNote): HumanNoteListItem {
+function toListItem(
+  note: Pick<
+    ProjectedHumanNote,
+    "id" | "title" | "canonicalPath" | "revision" | "state"
+  >
+): HumanNoteListItem {
   return {
     id: note.id,
     title: note.title,
@@ -148,6 +170,152 @@ function toListItem(note: ProjectedHumanNote): HumanNoteListItem {
     state: note.state,
     url: `/notes/${note.id}`
   };
+}
+
+function toStructuredItem(
+  note: ProjectedHumanNote | ProjectedDailyNote
+): StructuredNoteItem {
+  return {
+    kind: structuredKind(note),
+    id: note.id,
+    title: note.title,
+    canonicalPath: note.canonicalPath,
+    revision: note.revision,
+    type: note.type,
+    state: note.state,
+    tags: note.tags,
+    aliases: note.aliases,
+    properties: note.properties,
+    url: "kind" in note ? note.url : `/notes/${note.id}`,
+    fields: projectedFields(note)
+  };
+}
+
+function projectedFields(
+  note: ProjectedHumanNote | ProjectedDailyNote
+): Record<string, OrganizationModelValue | null> {
+  return {
+    kind: structuredKind(note),
+    title: note.title,
+    canonical_path: note.canonicalPath,
+    created: note.created,
+    type: note.type,
+    state: note.state,
+    tags: note.tags,
+    aliases: note.aliases,
+    ...note.properties
+  };
+}
+
+function structuredKind(
+  note: ProjectedHumanNote | ProjectedDailyNote
+): "standalone" | "daily" {
+  return "kind" in note ? "daily" : "standalone";
+}
+
+function projectedField(
+  note: ProjectedHumanNote | ProjectedDailyNote,
+  field: string
+): OrganizationModelValue | null | undefined {
+  return projectedFields(note)[field];
+}
+
+function matchesFilter(
+  note: ProjectedHumanNote | ProjectedDailyNote,
+  filter: QueryFilter
+): boolean {
+  if ("all" in filter) {
+    return filter.all.every((child) => matchesFilter(note, child));
+  }
+  if ("any" in filter) {
+    return filter.any.some((child) => matchesFilter(note, child));
+  }
+  if ("not" in filter) {
+    return !matchesFilter(note, filter.not);
+  }
+  return matchesPredicate(projectedField(note, filter.field), filter);
+}
+
+function matchesPredicate(
+  candidate: OrganizationModelValue | null | undefined,
+  predicate: QueryPredicate
+): boolean {
+  const expected = predicate.value;
+  switch (predicate.operator) {
+    case "equals":
+      return equalValues(candidate, expected);
+    case "not_equals":
+      return !equalValues(candidate, expected);
+    case "in":
+      return Array.isArray(expected)
+        ? expected.some((value) => equalValues(candidate, value))
+        : false;
+    case "not_in":
+      return Array.isArray(expected)
+        ? expected.every((value) => !equalValues(candidate, value))
+        : false;
+    case "contains":
+      return Array.isArray(candidate)
+        ? candidate.some((value) => equalValues(value, expected))
+        : typeof candidate === "string" && typeof expected === "string"
+          ? candidate.includes(expected)
+          : false;
+    case "exists": {
+      const exists = candidate !== undefined && candidate !== null;
+      return typeof expected === "boolean" ? exists === expected : exists;
+    }
+    case "greater_than":
+      return (
+        candidate !== undefined &&
+        candidate !== null &&
+        expected !== undefined &&
+        compareValues(candidate, expected) > 0
+      );
+    case "greater_than_or_equal":
+      return (
+        candidate !== undefined &&
+        candidate !== null &&
+        expected !== undefined &&
+        compareValues(candidate, expected) >= 0
+      );
+    case "less_than":
+      return (
+        candidate !== undefined &&
+        candidate !== null &&
+        expected !== undefined &&
+        compareValues(candidate, expected) < 0
+      );
+    case "less_than_or_equal":
+      return (
+        candidate !== undefined &&
+        candidate !== null &&
+        expected !== undefined &&
+        compareValues(candidate, expected) <= 0
+      );
+  }
+}
+
+function equalValues(left: unknown, right: unknown): boolean {
+  return Array.isArray(left) && Array.isArray(right)
+    ? left.length === right.length &&
+        left.every((value, index) => value === right[index])
+    : left === right;
+}
+
+function compareValues(left: unknown, right: unknown): number {
+  if (left === right) {
+    return 0;
+  }
+  if (left === undefined || left === null) {
+    return 1;
+  }
+  if (right === undefined || right === null) {
+    return -1;
+  }
+  if (typeof left === "number" && typeof right === "number") {
+    return left - right;
+  }
+  return String(left).localeCompare(String(right));
 }
 
 function searchSnippet(

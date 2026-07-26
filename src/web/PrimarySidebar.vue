@@ -68,16 +68,20 @@ function navigate(event: MouseEvent, destination: string): void {
       </a>
       <a
         class="nav-item"
-        href="#types"
-        @click="navigate($event, '#types')"
+        :class="{ active: active === 'types' }"
+        href="/types"
+        :aria-current="active === 'types' ? 'page' : undefined"
+        @click="navigate($event, '/types')"
       >
         <span class="nav-glyph types-glyph" aria-hidden="true"></span>
         Types
       </a>
       <a
         class="nav-item"
-        href="#views"
-        @click="navigate($event, '#views')"
+        :class="{ active: active === 'views' }"
+        href="/views"
+        :aria-current="active === 'views' ? 'page' : undefined"
+        @click="navigate($event, '/views')"
       >
         <span class="nav-glyph views-glyph" aria-hidden="true"></span>
         Views

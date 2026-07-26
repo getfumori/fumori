@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { organizationModelValueSchema } from "./organization-model.js";
+
 const revisionSchema = z.string().regex(/^[0-9a-f]{64}$/);
 
 export const humanNoteResponseSchema = z.object({
@@ -9,16 +11,24 @@ export const humanNoteResponseSchema = z.object({
   revision: revisionSchema,
   bodyMarkdown: z.string(),
   sourceMarkdown: z.string(),
+  type: z.string().min(1).nullable(),
   state: z.string().min(1),
+  tags: z.array(z.string()),
+  aliases: z.array(z.string()),
+  properties: z.record(z.string(), organizationModelValueSchema),
   vault: z.object({
     id: z.uuid(),
     name: z.string().min(1)
   })
 });
 
-export const createHumanNoteRequestSchema = z.object({
-  context: z.enum(["global", "inbox"])
-});
+export const createHumanNoteRequestSchema = z.discriminatedUnion("context", [
+  z.object({ context: z.enum(["global", "inbox"]) }),
+  z.object({
+    context: z.literal("type"),
+    type: z.string().regex(/^[a-z][a-z0-9_-]*$/)
+  })
+]);
 
 const baseRevisionSchema = z.string().regex(/^[0-9a-f]{64}$/);
 
@@ -32,6 +42,25 @@ export const saveHumanNoteRequestSchema = z.discriminatedUnion("format", [
     format: z.literal("raw"),
     baseRevision: baseRevisionSchema,
     sourceMarkdown: z.string()
+  }),
+  z.object({
+    format: z.literal("metadata"),
+    baseRevision: baseRevisionSchema,
+    type: z.string().regex(/^[a-z][a-z0-9_-]*$/).nullable(),
+    state: z.string().min(1),
+    tags: z.array(z.string()),
+    aliases: z.array(z.string()),
+    properties: z.record(z.string(), organizationModelValueSchema)
+  }),
+  z.object({
+    format: z.literal("document"),
+    baseRevision: baseRevisionSchema,
+    bodyMarkdown: z.string(),
+    type: z.string().regex(/^[a-z][a-z0-9_-]*$/).nullable(),
+    state: z.string().min(1),
+    tags: z.array(z.string()),
+    aliases: z.array(z.string()),
+    properties: z.record(z.string(), organizationModelValueSchema)
   })
 ]);
 

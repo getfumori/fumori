@@ -1,5 +1,11 @@
 import type { SaveDailyNoteRequest } from "../contracts/daily-note.js";
 import type { SaveHumanNoteRequest } from "../contracts/human-note.js";
+import type {
+  QuerySpec,
+  SavedView,
+  StructuredNoteItem,
+  TypeDefinition
+} from "../contracts/organization-model.js";
 import {
   DailyNotes,
   type DailyNoteSnapshot
@@ -9,7 +15,10 @@ import {
   InMemoryProjection,
   type ProjectedHumanNote
 } from "./in-memory-projection.js";
-import { loadOrganizationModel } from "./organization-model.js";
+import {
+  loadOrganizationModel,
+  type OrganizationModel
+} from "./organization-model.js";
 import { openVault } from "./open.js";
 
 export {
@@ -33,17 +42,20 @@ export class VaultModule {
   readonly #dailyNotes: DailyNotes;
   readonly #humanNotes: HumanNotes;
   readonly #projection: InMemoryProjection;
+  readonly #model: OrganizationModel;
 
   private constructor(options: {
     identity: VaultIdentity;
     dailyNotes: DailyNotes;
     humanNotes: HumanNotes;
     projection: InMemoryProjection;
+    model: OrganizationModel;
   }) {
     this.identity = options.identity;
     this.#dailyNotes = options.dailyNotes;
     this.#humanNotes = options.humanNotes;
     this.#projection = options.projection;
+    this.#model = options.model;
   }
 
   static async open(
@@ -56,17 +68,18 @@ export class VaultModule {
       inboxState: model.inboxState,
       archivedState: model.archivedState
     });
-    await projection.rebuildDailyNotes(vault.path);
-    const dailyNotes = new DailyNotes(vault.path, today, (note) => {
+    const dailyNotes = new DailyNotes(vault.path, today, model, (note) => {
       projection.publishDailyNote(note);
     });
+    await dailyNotes.rebuildProjection();
     const humanNotes = new HumanNotes(vault.path, projection, model);
     await humanNotes.rebuildProjection();
     return new VaultModule({
       identity: { id: vault.id, name: vault.name },
       dailyNotes,
       humanNotes,
-      projection
+      projection,
+      model
     });
   }
 
@@ -91,8 +104,8 @@ export class VaultModule {
     return this.#humanNotes.read(id);
   }
 
-  createHumanNote(): Promise<ProjectedHumanNote> {
-    return this.#humanNotes.create();
+  createHumanNote(type?: string): Promise<ProjectedHumanNote> {
+    return this.#humanNotes.create(type);
   }
 
   saveHumanNote(
@@ -109,4 +122,80 @@ export class VaultModule {
   search(query: string) {
     return this.#projection.search(query);
   }
+
+  types(): readonly TypeDefinition[] {
+    return this.#model.types;
+  }
+
+  views(): readonly SavedView[] {
+    return this.#model.views;
+  }
+
+  modelSummary(): {
+    states: string[];
+    types: readonly TypeDefinition[];
+    views: readonly SavedView[];
+  } {
+    return {
+      states: [...this.#model.states],
+      types: this.#model.types,
+      views: this.#model.views
+    };
+  }
+
+  typeResult(key: string):
+    | (TypeDefinition & {
+        items: StructuredNoteItem[];
+      })
+    | undefined {
+    const type = this.#model.type(key);
+    return type
+      ? {
+          ...type,
+          items: this.#projection.queryHumanNotes({
+            filter: { field: "type", operator: "equals", value: key }
+          })
+        }
+      : undefined;
+  }
+
+  viewResult(key: string):
+    | (SavedView & {
+        groups: Array<{ key: string; items: StructuredNoteItem[] }>;
+        items: StructuredNoteItem[];
+      })
+    | undefined {
+    const view = this.#model.view(key);
+    if (!view) {
+      return undefined;
+    }
+    const items = this.#projection.queryHumanNotes(view.query);
+    return {
+      ...view,
+      groups: groupedItems(items, view.query),
+      items
+    };
+  }
+}
+
+function groupedItems(
+  items: StructuredNoteItem[],
+  query: QuerySpec
+): Array<{ key: string; items: StructuredNoteItem[] }> {
+  if (!query.groupBy) {
+    return [];
+  }
+  const groups = new Map<string, StructuredNoteItem[]>();
+  for (const item of items) {
+    const value = item.fields[query.groupBy];
+    const key = Array.isArray(value)
+      ? value.join(", ")
+      : value === undefined || value === null
+        ? "Unspecified"
+        : String(value);
+    const group = groups.get(key) ?? [];
+    group.push(item);
+    groups.set(key, group);
+  }
+  return [...groups].map(([key, grouped]) => ({ key, items: grouped }));
 }

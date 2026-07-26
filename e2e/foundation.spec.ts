@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -60,6 +60,7 @@ async function stopServer(server: ChildProcess): Promise<void> {
 test("the packed CLI edits canonical Daily Notes through Chromium", async ({
   browser
 }) => {
+  test.setTimeout(180_000);
   const temporaryRoot = await mkdtemp(join(tmpdir(), "fumori-packed-e2e-"));
   let server: ChildProcess | undefined;
 
@@ -325,6 +326,71 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
     );
 
     await stopServer(server);
+    const projectTypePath = join(
+      vault,
+      ".second-brain",
+      "model",
+      "types",
+      "project.md"
+    );
+    const activeProjectsViewPath = join(
+      vault,
+      ".second-brain",
+      "model",
+      "views",
+      "active-projects.md"
+    );
+    const projectTypeSource = `---
+_schema: fumori.model.type
+_version: 1
+key: project
+name: Project
+space: human
+properties:
+  - key: priority
+    name: Priority
+    kind: select
+    options: [low, high]
+    default: low
+    required: true
+  - key: estimate
+    name: Estimate
+    kind: number
+    default: 1
+    advisory: Use a small whole number.
+---
+
+# Project
+`;
+    const activeProjectsViewSource = `---
+_schema: fumori.model.view
+_version: 1
+key: active-projects
+name: Active projects
+space: human
+query:
+  filter:
+    all:
+      - field: type
+        operator: equals
+        value: project
+      - field: state
+        operator: not_equals
+        value: archived
+  order:
+    - field: priority
+      direction: descending
+  group_by: priority
+  layout: table
+  visible_columns: [title, state, priority]
+---
+
+# Active projects
+`;
+    await Promise.all([
+      writeFile(projectTypePath, projectTypeSource, "utf8"),
+      writeFile(activeProjectsViewPath, activeProjectsViewSource, "utf8")
+    ]);
     server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
       cwd: temporaryRoot,
       stdio: ["ignore", "pipe", "pipe"]
@@ -578,6 +644,65 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
       .fill("# Inbox Seed\n\nCaptured from Inbox.");
     await page.keyboard.press("Control+s");
     await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+
+    await page.getByRole("link", { name: "Types", exact: true }).click();
+    await expect(page).toHaveURL(`${rawRestartedUrl}/types`);
+    await page.getByRole("link", { name: /^Project\b/ }).click();
+    await expect(page).toHaveURL(`${rawRestartedUrl}/types/project`);
+    await page.getByRole("button", { name: "New Project" }).click();
+    await expect(page).toHaveURL(/\/notes\/[0-9a-f-]{36}$/);
+    await page.getByRole("button", { name: "Inspector" }).click();
+    const inspector = page.getByRole("form", { name: "Document inspector" });
+    await expect(inspector.getByLabel("Type")).toHaveValue("project");
+    await expect(inspector.getByLabel("State")).toHaveValue("captured");
+    await expect(inspector.getByLabel("Priority")).toHaveValue("low");
+    await expect(inspector.getByText("Required")).toBeVisible();
+    await expect(inspector.getByText("Use a small whole number.")).toBeVisible();
+    await inspector.getByLabel("Priority").selectOption("high");
+    await inspector.getByLabel("Estimate").fill("3");
+    await inspector.getByLabel("Tags").fill("active, lighthouse");
+    await inspector.getByLabel("Aliases").fill("Beacon plan");
+    await page
+      .getByTestId("rich-editor")
+      .locator("[contenteditable='true']")
+      .fill("# Fog Beacon\n\nKeep the channel visible.");
+    await page.keyboard.press("Control+s");
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+    const typedNotePath = join(vault, "human", "notes", "fog-beacon.md");
+    await expect.poll(() => readFile(typedNotePath, "utf8")).toContain(
+      'priority: "high"'
+    );
+    const typedSource = await readFile(typedNotePath, "utf8");
+    for (const expected of [
+      "type: project",
+      "state: captured",
+      "tags:",
+      "- active",
+      "- lighthouse",
+      "aliases:",
+      "- Beacon plan",
+      'priority: "high"',
+      "estimate: 3"
+    ]) {
+      expect(typedSource).toContain(expected);
+    }
+
+    await page.getByRole("link", { name: "Types", exact: true }).click();
+    await page.getByRole("link", { name: /^Project\b/ }).click();
+    await expect(page.getByRole("link", { name: "Fog Beacon" })).toBeVisible();
+    await page.getByRole("link", { name: "Views", exact: true }).click();
+    await page
+      .getByRole("link", { name: /^Active projects\b/ })
+      .click();
+    await expect(
+      page
+        .locator("[data-zone='context']")
+        .getByRole("link", { name: "Fog Beacon" })
+    ).toBeVisible();
+    expect(await readFile(projectTypePath, "utf8")).toBe(projectTypeSource);
+    expect(await readFile(activeProjectsViewPath, "utf8")).toBe(
+      activeProjectsViewSource
+    );
 
     await page.keyboard.press("Control+k");
     await expect(page).toHaveURL(`${rawRestartedUrl}/search`);

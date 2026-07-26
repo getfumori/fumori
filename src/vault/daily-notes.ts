@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  readFile
+  readFile,
+  readdir
 } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -9,12 +10,21 @@ import { z } from "zod";
 
 import { dailyNoteDateSchema } from "../contracts/daily-note-date.js";
 import type { SaveDailyNoteRequest } from "../contracts/daily-note.js";
+import {
+  organizationModelValueMatches,
+  type OrganizationModelValue
+} from "../contracts/organization-model.js";
 import { atomicReplace } from "./atomic-publication.js";
+import type { OrganizationModel } from "./organization-model.js";
 
 type DailyNoteMetadata = {
   id: string;
   created: string;
   date: string;
+  state: string;
+  tags: string[];
+  aliases: string[];
+  properties: Record<string, OrganizationModelValue>;
   frontmatter?: string;
 };
 
@@ -24,6 +34,11 @@ export type DailyNoteSnapshot = {
   revision: string | null;
   bodyMarkdown: string;
   sourceMarkdown: string | null;
+  type: "daily-note";
+  state: string;
+  tags: string[];
+  aliases: string[];
+  properties: Record<string, OrganizationModelValue>;
 };
 
 export class StaleDailyNoteRevisionError extends Error {
@@ -52,11 +67,28 @@ function workingRevision(source: string): string {
   return createHash("sha256").update(source).digest("hex");
 }
 
-function createDailyNoteMetadata(date: string): DailyNoteMetadata {
+function createDailyNoteMetadata(
+  date: string,
+  model: OrganizationModel
+): DailyNoteMetadata {
+  const type = model.type("daily-note");
+  if (!type) {
+    throw new InvalidDailyNoteMarkdownError(
+      "Organization Model Type does not exist: daily-note"
+    );
+  }
   return {
     id: randomUUID(),
     created: new Date().toISOString(),
-    date
+    date,
+    state: type.defaultState ?? "organized",
+    tags: [],
+    aliases: [],
+    properties: Object.fromEntries(
+      type.properties
+        .filter((property) => property.default !== undefined)
+        .map((property) => [property.key, property.default!])
+    )
   };
 }
 
@@ -74,7 +106,8 @@ function reservedValue(frontmatter: string, key: string): string {
 
 function decodeDailyNote(
   source: string,
-  expectedDate: string
+  expectedDate: string,
+  model: OrganizationModel
 ): { bodyMarkdown: string; metadata: DailyNoteMetadata } {
   const bodyMarker = "\n---\n\n";
   const bodyStart = source.indexOf(bodyMarker);
@@ -113,6 +146,15 @@ function decodeDailyNote(
   }
   const id = reservedValue(frontmatter, "_id");
   const created = reservedValue(frontmatter, "_created");
+  const frontmatterValue = parsedFrontmatter as Record<string, unknown>;
+  const state = reservedValue(frontmatter, "state");
+  if (!model.states.has(state)) {
+    throw new InvalidDailyNoteMarkdownError(
+      `Core property 'state' must name a Knowledge Lifecycle state: ${state}`
+    );
+  }
+  const tags = stringList(frontmatterValue.tags, "tags");
+  const aliases = stringList(frontmatterValue.aliases, "aliases");
   if (!z.uuid().safeParse(id).success) {
     throw new InvalidDailyNoteMarkdownError(
       "Reserved field '_id' must be a UUID."
@@ -140,6 +182,10 @@ function decodeDailyNote(
     id,
     created,
     date: expectedDate,
+    state,
+    tags,
+    aliases,
+    properties: decodeTypeProperties(frontmatterValue, model),
     frontmatter
   };
   let bodyMarkdown = content.slice(requiredHeading.length);
@@ -152,20 +198,66 @@ function decodeDailyNote(
   return { bodyMarkdown, metadata };
 }
 
+function decodeTypeProperties(
+  frontmatter: Record<string, unknown>,
+  model: OrganizationModel
+): Record<string, OrganizationModelValue> {
+  const properties: Record<string, OrganizationModelValue> = {};
+  for (const property of model.type("daily-note")?.properties ?? []) {
+    const value = frontmatter[property.key];
+    if (property.required && value === undefined) {
+      throw new InvalidDailyNoteMarkdownError(
+        `Type property '${property.key}' is required.`
+      );
+    }
+    if (value !== undefined) {
+      if (
+        !organizationModelValueMatches(
+          property.kind,
+          value,
+          property.options
+        )
+      ) {
+        throw new InvalidDailyNoteMarkdownError(
+          `Type property '${property.key}' does not match kind '${property.kind}'.`
+        );
+      }
+      properties[property.key] = value as OrganizationModelValue;
+    }
+  }
+  return properties;
+}
+
+function stringList(
+  value: unknown,
+  key: "tags" | "aliases"
+): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new InvalidDailyNoteMarkdownError(
+      `Core property '${key}' must be a list of strings.`
+    );
+  }
+  return value;
+}
+
 function encodeDailyNote(
   metadata: DailyNoteMetadata,
   bodyMarkdown: string
 ): string {
   const body = bodyMarkdown.length > 0 ? `\n${bodyMarkdown}\n` : "";
+  const propertySource = Object.entries(metadata.properties)
+    .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
+    .join("\n");
   const frontmatter = metadata.frontmatter ?? `---
 _id: ${metadata.id}
 _schema: fumori.daily-note
 _version: 1
 _created: ${metadata.created}
 type: daily-note
-state: organized
-tags: []
-aliases: []
+state: ${metadata.state}
+tags: ${JSON.stringify(metadata.tags)}
+aliases: ${JSON.stringify(metadata.aliases)}
+${propertySource ? `${propertySource}\n` : ""}\
 date: ${metadata.date}
 ---`;
   return `${frontmatter}
@@ -177,6 +269,7 @@ ${body}`;
 export class DailyNotes {
   readonly #dailyDirectory: string;
   readonly #today: () => string;
+  readonly #model: OrganizationModel;
   readonly #writeTails = new Map<string, Promise<void>>();
   readonly #virtualMetadata = new Map<string, DailyNoteMetadata>();
   readonly #onPublication:
@@ -186,10 +279,12 @@ export class DailyNotes {
   constructor(
     vaultPath: string,
     today: () => string,
+    model: OrganizationModel,
     onPublication?: (note: DailyNoteSnapshot) => void
   ) {
     this.#dailyDirectory = join(vaultPath, "human", "daily");
     this.#today = today;
+    this.#model = model;
     this.#onPublication = onPublication;
   }
 
@@ -212,17 +307,29 @@ export class DailyNotes {
         exists: false,
         revision: null,
         bodyMarkdown: "",
-        sourceMarkdown
+        sourceMarkdown,
+        ...this.#publicMetadata(this.#metadataForMissing(date))
       };
     }
-    const decoded = decodeDailyNote(source, date);
+    const decoded = decodeDailyNote(source, date, this.#model);
     return {
       date,
       exists: true,
       revision: workingRevision(source),
       bodyMarkdown: decoded.bodyMarkdown,
-      sourceMarkdown: source
+      sourceMarkdown: source,
+      ...this.#publicMetadata(decoded.metadata)
     };
+  }
+
+  async rebuildProjection(): Promise<void> {
+    for (const filename of await readdir(this.#dailyDirectory)) {
+      const date = filename.match(/^(\d{4}-\d{2}-\d{2})\.md$/)?.[1];
+      if (!date) {
+        continue;
+      }
+      this.#onPublication?.(await this.read(date));
+    }
   }
 
   async save(
@@ -242,12 +349,14 @@ export class DailyNotes {
       if (input.format === "raw") {
         const submittedMetadata = decodeDailyNote(
           input.sourceMarkdown,
-          date
+          date,
+          this.#model
         ).metadata;
         if (current.sourceMarkdown) {
           const currentMetadata = decodeDailyNote(
             current.sourceMarkdown,
-            date
+            date,
+            this.#model
           ).metadata;
           if (submittedMetadata.id !== currentMetadata.id) {
             throw new InvalidDailyNoteMarkdownError(
@@ -267,8 +376,38 @@ export class DailyNotes {
         return saved;
       }
       const metadata = current.exists
-        ? decodeDailyNote(await readFile(path, "utf8"), date).metadata
+        ? decodeDailyNote(await readFile(path, "utf8"), date, this.#model).metadata
         : this.#metadataForMissing(date);
+      if (input.format === "document") {
+        this.#validateMetadata(input);
+        const existingFrontmatter =
+          metadata.frontmatter ??
+          (() => {
+            const generated = encodeDailyNote(metadata, "");
+            return generated.slice(
+              0,
+              generated.indexOf("\n---\n\n") + "\n---".length
+            );
+          })();
+        const document = parseDocument(
+          existingFrontmatter.slice(
+            "---\n".length,
+            existingFrontmatter.length - "\n---".length
+          ),
+          { uniqueKeys: true }
+        );
+        document.set("state", input.state);
+        document.set("tags", input.tags);
+        document.set("aliases", input.aliases);
+        for (const [key, value] of Object.entries(input.properties)) {
+          document.set(key, value);
+        }
+        metadata.frontmatter = `---\n${document.toString({ lineWidth: 0 })}---`;
+        metadata.state = input.state;
+        metadata.tags = input.tags;
+        metadata.aliases = input.aliases;
+        metadata.properties = input.properties;
+      }
       await atomicReplace(path, encodeDailyNote(metadata, input.bodyMarkdown));
       this.#virtualMetadata.delete(date);
       const saved = await this.read(date);
@@ -290,7 +429,7 @@ export class DailyNotes {
       await atomicReplace(
         path,
         encodeDailyNote(
-          createDailyNoteMetadata(date),
+          createDailyNoteMetadata(date, this.#model),
           ""
         )
       );
@@ -306,9 +445,57 @@ export class DailyNotes {
     if (existing) {
       return existing;
     }
-    const created = createDailyNoteMetadata(date);
+    const created = createDailyNoteMetadata(date, this.#model);
     this.#virtualMetadata.set(date, created);
     return created;
+  }
+
+  #publicMetadata(metadata: DailyNoteMetadata) {
+    return {
+      type: "daily-note" as const,
+      state: metadata.state,
+      tags: metadata.tags,
+      aliases: metadata.aliases,
+      properties: metadata.properties
+    };
+  }
+
+  #validateMetadata(
+    input: Extract<SaveDailyNoteRequest, { format: "document" }>
+  ): void {
+    if (!this.#model.states.has(input.state)) {
+      throw new InvalidDailyNoteMarkdownError(
+        `Core property 'state' must name a Knowledge Lifecycle state: ${input.state}`
+      );
+    }
+    const type = this.#model.type("daily-note");
+    for (const property of type?.properties ?? []) {
+      const value = input.properties[property.key];
+      if (property.required && value === undefined) {
+        throw new InvalidDailyNoteMarkdownError(
+          `Type property '${property.key}' is required.`
+        );
+      }
+      if (
+        value !== undefined &&
+        !organizationModelValueMatches(
+          property.kind,
+          value,
+          property.options
+        )
+      ) {
+        throw new InvalidDailyNoteMarkdownError(
+          `Type property '${property.key}' does not match kind '${property.kind}'.`
+        );
+      }
+    }
+    for (const key of Object.keys(input.properties)) {
+      if (!type?.properties.some((property) => property.key === key)) {
+        throw new InvalidDailyNoteMarkdownError(
+          `Type 'daily-note' does not define property '${key}'.`
+        );
+      }
+    }
   }
 
   async #withWriteLock<T>(date: string, operation: () => Promise<T>): Promise<T> {

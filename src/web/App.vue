@@ -15,6 +15,11 @@ import {
   dailyNoteResponseSchema
 } from "../contracts/daily-note";
 import { humanNoteResponseSchema } from "../contracts/human-note";
+import {
+  type OrganizationModelResponse,
+  organizationModelResponseSchema
+} from "../contracts/organization-model";
+import DocumentInspector from "./DocumentInspector.vue";
 import KnowledgeApp from "./KnowledgeApp.vue";
 import PrimarySidebar from "./PrimarySidebar.vue";
 import RawMarkdownEditor from "./RawMarkdownEditor.vue";
@@ -40,6 +45,7 @@ const isDailyView = isTodayRoute || historicalDate !== undefined;
 
 const config = ref<AppConfig>();
 const note = ref<DailyNoteResponse>();
+const model = ref<OrganizationModelResponse>();
 const fatalError = ref<string>();
 const saveError = ref<string>();
 const saveStatus = ref<SaveStatus>("ready");
@@ -47,6 +53,7 @@ const autosave = ref<AutosaveController>();
 const editorMode = ref<EditorMode>("rich");
 const richEditorSafe = ref(true);
 const rawDraft = ref("");
+const inspectorOpen = ref(false);
 
 const displayTitle = computed(() =>
   isTodayRoute ? "Today" : (note.value?.date ?? historicalDate ?? "")
@@ -138,11 +145,13 @@ function configureAutosave(currentNote: DailyNoteResponse): void {
             ...saved,
             bodyMarkdown: note.value?.bodyMarkdown ?? saved.bodyMarkdown
           };
-        } else {
+        } else if (draft.format === "raw") {
           note.value = saved;
           if (rawDraft.value === draft.sourceMarkdown) {
             rawDraft.value = saved.sourceMarkdown!;
           }
+        } else if (draft.format === "document") {
+          note.value = saved;
         }
         richEditorSafe.value = isRichMarkdownRoundTripSafe(
           saved.bodyMarkdown
@@ -163,9 +172,10 @@ async function load(): Promise<void> {
     const noteEndpoint = historicalDate
       ? `/api/v1/daily/${historicalDate}`
       : "/api/v1/today";
-    const [configResponse, noteResponse] = await Promise.all([
+    const [configResponse, noteResponse, modelResponse] = await Promise.all([
       fetch("/api/v1/config", { cache: "no-store" }),
-      fetch(noteEndpoint, { cache: "no-store" })
+      fetch(noteEndpoint, { cache: "no-store" }),
+      fetch("/api/v1/model", { cache: "no-store" })
     ]);
     if (!configResponse.ok) {
       throw new Error(`Configuration request failed (${configResponse.status})`);
@@ -173,8 +183,14 @@ async function load(): Promise<void> {
     if (!noteResponse.ok) {
       throw new Error(`Daily Note request failed (${noteResponse.status})`);
     }
+    if (!modelResponse.ok) {
+      throw new Error(`Organization Model request failed (${modelResponse.status})`);
+    }
     config.value = appConfigSchema.parse(await configResponse.json());
     note.value = dailyNoteResponseSchema.parse(await noteResponse.json());
+    model.value = organizationModelResponseSchema.parse(
+      await modelResponse.json()
+    );
     rawDraft.value = note.value.sourceMarkdown ?? "";
     richEditorSafe.value =
       !note.value.exists ||
@@ -206,7 +222,38 @@ function updateBody(bodyMarkdown: string): void {
     return;
   }
   note.value = { ...note.value, bodyMarkdown };
-  markDraftDirty({ format: "rich", bodyMarkdown });
+  markDraftDirty(documentDraft());
+}
+
+function documentDraft(): Extract<AutosaveDraft, { format: "document" }> {
+  if (!note.value) {
+    throw new Error("No Daily Note is open");
+  }
+  return {
+    format: "document",
+    bodyMarkdown: note.value.bodyMarkdown,
+    type: "daily-note",
+    state: note.value.state,
+    tags: note.value.tags,
+    aliases: note.value.aliases,
+    properties: note.value.properties
+  };
+}
+
+function updateMetadata(
+  metadata: {
+    type: string | null;
+    state: string;
+    tags: string[];
+    aliases: string[];
+    properties: DailyNoteResponse["properties"];
+  }
+): void {
+  if (!note.value) {
+    return;
+  }
+  note.value = { ...note.value, ...metadata, type: "daily-note" };
+  markDraftDirty(documentDraft());
 }
 
 function updateRawSource(sourceMarkdown: string): void {
@@ -417,6 +464,15 @@ onBeforeUnmount(() => {
         </div>
         <div class="document-actions">
           <button
+            v-if="note && (note.exists || isTodayRoute)"
+            type="button"
+            class="editor-mode-button"
+            :aria-expanded="inspectorOpen"
+            @click="inspectorOpen = !inspectorOpen"
+          >
+            Inspector
+          </button>
+          <button
             v-if="
               note &&
               (note.exists || isTodayRoute) &&
@@ -453,6 +509,14 @@ onBeforeUnmount(() => {
         <p class="document-date">{{ longDate }}</p>
         <h1>{{ displayTitle }}</h1>
         <div class="writing-rule" aria-hidden="true"></div>
+        <DocumentInspector
+          v-if="inspectorOpen && model && (note.exists || isTodayRoute)"
+          :model="model"
+          :metadata="note"
+          type-locked
+          @update="updateMetadata"
+          @close="inspectorOpen = false"
+        />
 
         <div
           v-if="!isTodayRoute && !note.exists"

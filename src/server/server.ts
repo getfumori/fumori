@@ -24,6 +24,13 @@ import {
   searchQuerySchema,
   searchResponseSchema
 } from "../contracts/search.js";
+import {
+  organizationModelResponseSchema,
+  savedViewListResponseSchema,
+  savedViewResultResponseSchema,
+  typeResultResponseSchema,
+  typeDefinitionListResponseSchema
+} from "../contracts/organization-model.js";
 import { todayResponseSchema } from "../contracts/today.js";
 import {
   ExplicitDailyNoteCreationRequiredError,
@@ -179,8 +186,10 @@ export async function startServer(
     );
   });
   app.post("/api/v1/notes", async (context) => {
-    createHumanNoteRequestSchema.parse(await context.req.json());
-    const note = await vault.createHumanNote();
+    const input = createHumanNoteRequestSchema.parse(await context.req.json());
+    const note = await vault.createHumanNote(
+      input.context === "type" ? input.type : undefined
+    );
     context.header("Cache-Control", "no-store");
     return context.json(
       humanNoteResponseSchema.parse({
@@ -246,6 +255,36 @@ export async function startServer(
       humanNoteListResponseSchema.parse(vault.humanNoteLists().inbox)
     );
   });
+  app.get("/api/v1/types", (context) => {
+    context.header("Cache-Control", "no-store");
+    return context.json(typeDefinitionListResponseSchema.parse(vault.types()));
+  });
+  app.get("/api/v1/model", (context) => {
+    context.header("Cache-Control", "no-store");
+    return context.json(
+      organizationModelResponseSchema.parse(vault.modelSummary())
+    );
+  });
+  app.get("/api/v1/types/:key", (context) => {
+    const result = vault.typeResult(context.req.param("key"));
+    if (!result) {
+      return context.json({ error: "not_found" }, 404);
+    }
+    context.header("Cache-Control", "no-store");
+    return context.json(typeResultResponseSchema.parse(result));
+  });
+  app.get("/api/v1/views", (context) => {
+    context.header("Cache-Control", "no-store");
+    return context.json(savedViewListResponseSchema.parse(vault.views()));
+  });
+  app.get("/api/v1/views/:key", (context) => {
+    const result = vault.viewResult(context.req.param("key"));
+    if (!result) {
+      return context.json({ error: "not_found" }, 404);
+    }
+    context.header("Cache-Control", "no-store");
+    return context.json(savedViewResultResponseSchema.parse(result));
+  });
   app.get("/api/v1/search", (context) => {
     const query = searchQuerySchema.parse(context.req.query("q"));
     context.header("Cache-Control", "no-store");
@@ -266,6 +305,10 @@ export async function startServer(
   app.get("/notes/:id", serveWebApp);
   app.get("/inbox", serveWebApp);
   app.get("/search", serveWebApp);
+  app.get("/types", serveWebApp);
+  app.get("/types/:key", serveWebApp);
+  app.get("/views", serveWebApp);
+  app.get("/views/:key", serveWebApp);
 
   if (!isLoopback(options.host)) {
     process.stderr.write(

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { dailyNoteDateSchema } from "./daily-note-date.js";
+import { organizationModelValueSchema } from "./organization-model.js";
 
 export const dailyNoteResponseSchema = z.object({
   date: dailyNoteDateSchema,
@@ -8,6 +9,11 @@ export const dailyNoteResponseSchema = z.object({
   revision: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
   bodyMarkdown: z.string(),
   sourceMarkdown: z.string().nullable(),
+  type: z.literal("daily-note"),
+  state: z.string().min(1),
+  tags: z.array(z.string()),
+  aliases: z.array(z.string()),
+  properties: z.record(z.string(), organizationModelValueSchema),
   vault: z.object({
     id: z.uuid(),
     name: z.string().min(1)
@@ -26,6 +32,15 @@ export const saveDailyNoteRequestSchema = z.discriminatedUnion("format", [
     format: z.literal("raw"),
     baseRevision: baseRevisionSchema,
     sourceMarkdown: z.string()
+  }),
+  z.object({
+    format: z.literal("document"),
+    baseRevision: baseRevisionSchema,
+    bodyMarkdown: z.string(),
+    state: z.string().min(1),
+    tags: z.array(z.string()),
+    aliases: z.array(z.string()),
+    properties: z.record(z.string(), organizationModelValueSchema)
   })
 ]);
 
