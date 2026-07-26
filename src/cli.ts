@@ -10,6 +10,8 @@ import { bootstrapVault } from "./vault/bootstrap.js";
 const HELP = `Usage:
   fumori vault bootstrap --path <repository>
   fumori serve --vault <repository> [--host <host>] [--port <port>]
+    [--autosave-debounce-ms <milliseconds>]
+    [--autosave-max-dirty-ms <milliseconds>]
 `;
 
 const bootstrapSchema = z.object({
@@ -19,7 +21,9 @@ const bootstrapSchema = z.object({
 const serveSchema = z.object({
   vault: z.string().min(1),
   host: z.string().min(1).default("127.0.0.1"),
-  port: z.coerce.number().int().min(0).max(65_535).default(3000)
+  port: z.coerce.number().int().min(0).max(65_535).default(3000),
+  autosaveDebounceMs: z.coerce.number().int().positive().default(1_500),
+  autosaveMaxDirtyMs: z.coerce.number().int().positive().default(10_000)
 });
 
 function bootstrapArguments(arguments_: string[]) {
@@ -40,7 +44,9 @@ function serveArguments(arguments_: string[]) {
     options: {
       vault: { type: "string" },
       host: { type: "string" },
-      port: { type: "string" }
+      port: { type: "string" },
+      "autosave-debounce-ms": { type: "string" },
+      "autosave-max-dirty-ms": { type: "string" }
     },
     allowPositionals: false,
     strict: true
@@ -48,7 +54,9 @@ function serveArguments(arguments_: string[]) {
   return serveSchema.parse({
     vault: parsed.values.vault,
     host: parsed.values.host,
-    port: parsed.values.port
+    port: parsed.values.port,
+    autosaveDebounceMs: parsed.values["autosave-debounce-ms"],
+    autosaveMaxDirtyMs: parsed.values["autosave-max-dirty-ms"]
   });
 }
 

@@ -32,7 +32,10 @@ async function makeBootstrappedVault(): Promise<string> {
   return path;
 }
 
-async function startFumoriServer(vault: string): Promise<string> {
+async function startFumoriServer(
+  vault: string,
+  extraArguments: string[] = []
+): Promise<string> {
   const child = spawn(
     process.execPath,
     [
@@ -43,7 +46,8 @@ async function startFumoriServer(vault: string): Promise<string> {
       "--vault",
       vault,
       "--port",
-      "0"
+      "0",
+      ...extraArguments
     ],
     {
       cwd: process.cwd(),
@@ -102,5 +106,38 @@ describe("fumori serve", () => {
       "--porcelain"
     ]);
     expect(status).toBe("");
+  });
+
+  test("publishes the default autosave policy", async () => {
+    const vault = await makeBootstrappedVault();
+    const url = await startFumoriServer(vault);
+
+    const response = await fetch(`${url}/api/v1/config`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    await expect(response.json()).resolves.toEqual({
+      autosave: {
+        debounceMs: 1_500,
+        maxDirtyMs: 10_000
+      }
+    });
+  });
+
+  test("accepts an explicit autosave policy", async () => {
+    const vault = await makeBootstrappedVault();
+    const url = await startFumoriServer(vault, [
+      "--autosave-debounce-ms",
+      "250",
+      "--autosave-max-dirty-ms",
+      "2000"
+    ]);
+
+    const response = await fetch(`${url}/api/v1/config`);
+    await expect(response.json()).resolves.toEqual({
+      autosave: {
+        debounceMs: 250,
+        maxDirtyMs: 2_000
+      }
+    });
   });
 });

@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,7 +46,18 @@ async function packAndInstall(root: string): Promise<string> {
   return join(installDirectory, "node_modules", ".bin", "fumori");
 }
 
-test("the packed CLI bootstraps a Vault and opens virtual Today in Chromium", async ({
+async function stopServer(server: ChildProcess): Promise<void> {
+  if (server.exitCode !== null) {
+    return;
+  }
+  const exited = new Promise<void>((resolve) => {
+    server.once("exit", () => resolve());
+  });
+  server.kill("SIGTERM");
+  await exited;
+}
+
+test("the packed CLI edits canonical Daily Notes through Chromium", async ({
   browser
 }) => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "fumori-packed-e2e-"));
@@ -99,12 +111,18 @@ test("the packed CLI bootstraps a Vault and opens virtual Today in Chromium", as
     }
 
     const todayResponse = await fetch(`${url}/api/v1/today`);
-    const todayPayload = (await todayResponse.json()) as { date: string };
+    const todayPayload = (await todayResponse.json()) as {
+      date: string;
+      revision: string | null;
+    };
+    const dailyPath = join(
+      vault,
+      "human",
+      "daily",
+      `${todayPayload.date}.md`
+    );
     await expect(
-      readFile(
-        join(vault, "human", "daily", `${todayPayload.date}.md`),
-        "utf8"
-      )
+      readFile(dailyPath, "utf8")
     ).rejects.toMatchObject({ code: "ENOENT" });
     const { stdout: status } = await execFileAsync("git", [
       "-C",
@@ -113,6 +131,203 @@ test("the packed CLI bootstraps a Vault and opens virtual Today in Chromium", as
       "--porcelain"
     ]);
     expect(status).toBe("");
+
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 }
+    });
+    const page = await context.newPage();
+    await page.goto(url);
+    const editor = page
+      .getByTestId("rich-editor")
+      .locator("[contenteditable='true']");
+    await expect(editor).toBeVisible();
+    await editor.fill("The first thought grows here.");
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible({
+      timeout: 5_000
+    });
+    await expect
+      .poll(() => readFile(dailyPath, "utf8"))
+      .toContain("The first thought grows here.");
+
+    const toolbar = page.getByRole("toolbar", { name: "Formatting" });
+    await editor.fill("Opening paragraph with ");
+    await toolbar.getByRole("button", { name: "Bold" }).click();
+    await page.keyboard.type("bold");
+    await toolbar.getByRole("button", { name: "Bold" }).click();
+    await page.keyboard.type(", ");
+    await toolbar.getByRole("button", { name: "Italic" }).click();
+    await page.keyboard.type("italic");
+    await toolbar.getByRole("button", { name: "Italic" }).click();
+    await page.keyboard.type(", and ");
+    await toolbar.getByRole("button", { name: "Inline code" }).click();
+    await page.keyboard.type("inline code");
+    await toolbar.getByRole("button", { name: "Inline code" }).click();
+    await page.keyboard.type(".");
+
+    await page.keyboard.press("Enter");
+    await toolbar.getByRole("button", { name: "Heading 1" }).click();
+    await page.keyboard.type("Heading One");
+    await page.keyboard.press("Enter");
+    await toolbar.getByRole("button", { name: "Heading 2" }).click();
+    await page.keyboard.type("Heading Two");
+    await page.keyboard.press("Enter");
+    await toolbar.getByRole("button", { name: "Heading 3" }).click();
+    await page.keyboard.type("Heading Three");
+    await page.keyboard.press("Enter");
+
+    await toolbar.getByRole("button", { name: "Bullet list" }).click();
+    await page.keyboard.type("Bullet one");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Bullet two");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+
+    await toolbar.getByRole("button", { name: "Ordered list" }).click();
+    await page.keyboard.type("Ordered one");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Ordered two");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+
+    await toolbar.getByRole("button", { name: "Checklist" }).click();
+    await page.keyboard.type("Open task");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Done task");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+
+    await toolbar.getByRole("button", { name: "Blockquote" }).click();
+    await page.keyboard.type("Quoted thought");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    await toolbar.getByRole("button", { name: "Code block" }).click();
+    await page.keyboard.type("const answer = 42;");
+    const taskCheckboxes = editor.locator(
+      "ul[data-type='taskList'] input[type='checkbox']"
+    );
+    await expect(taskCheckboxes).toHaveCount(2);
+    await taskCheckboxes.nth(1).click();
+    await page.keyboard.press("Control+s");
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+    await page.reload();
+
+    await expect(editor.locator("h1")).toHaveText("Heading One");
+    await expect(editor.locator("h2")).toHaveText("Heading Two");
+    await expect(editor.locator("h3")).toHaveText("Heading Three");
+    await expect(editor.locator("strong")).toHaveText("bold");
+    await expect(editor.locator("em")).toHaveText("italic");
+    await expect(editor.locator("code").first()).toHaveText("inline code");
+    await expect(editor.locator("ul").first()).toContainText("Bullet one");
+    await expect(editor.locator("ol")).toContainText("Ordered one");
+    await expect(editor.locator("ul[data-type='taskList']")).toContainText(
+      "Open task"
+    );
+    await expect(editor.locator("blockquote")).toContainText("Quoted thought");
+    await expect(editor.locator("pre code")).toContainText(
+      "const answer = 42;"
+    );
+
+    await editor.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Rich re-edit survives.");
+    await page.keyboard.press("Control+s");
+    await expect
+      .poll(() => readFile(dailyPath, "utf8"), { timeout: 1_000 })
+      .toContain("Rich re-edit survives.");
+    const afterRichEdit = await readFile(dailyPath, "utf8");
+    for (const expected of [
+      "**bold**",
+      "*italic*",
+      "`inline code`",
+      "# Heading One",
+      "## Heading Two",
+      "### Heading Three",
+      "- Bullet one",
+      "1. Ordered one",
+      "- [ ] Open task",
+      "- [x] Done task",
+      "> Quoted thought",
+      "```",
+      "const answer = 42;"
+    ]) {
+      expect(afterRichEdit).toContain(expected);
+    }
+
+    await editor.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Background flush survives.");
+    await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+    await expect
+      .poll(() => readFile(dailyPath, "utf8"), { timeout: 1_000 })
+      .toContain("Background flush survives.");
+
+    await editor.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Primary navigation flush survives.");
+    await page.getByRole("link", { name: "Notes", exact: true }).click();
+    await expect
+      .poll(() => readFile(dailyPath, "utf8"), { timeout: 1_000 })
+      .toContain("Primary navigation flush survives.");
+
+    await editor.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Navigation flush survives.");
+    await page.getByRole("link", { name: /Open day/ }).click();
+    await expect
+      .poll(() => readFile(dailyPath, "utf8"), { timeout: 1_000 })
+      .toContain("Navigation flush survives.");
+    await page.goto(url);
+    const persistedCanonical = await readFile(dailyPath, "utf8");
+    const persisted = (await (
+      await fetch(`${url}/api/v1/today`)
+    ).json()) as { revision: string };
+    expect(persisted.revision).toBe(
+      createHash("sha256").update(persistedCanonical).digest("hex")
+    );
+
+    await stopServer(server);
+    server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
+      cwd: temporaryRoot,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const restartedUrl = await waitForFumoriServer(server, {
+      label: "Restarted packed Fumori server",
+      timeoutMs: 20_000
+    });
+    await page.goto(restartedUrl);
+    await expect(
+      page.getByTestId("rich-editor").getByText("Rich re-edit survives.")
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("rich-editor").locator("ul[data-type='taskList']")
+    ).toContainText("Done task");
+    await expect(
+      page.getByTestId("rich-editor").locator("pre code")
+    ).toContainText("const answer = 42;");
+
+    const historicalDate = "2000-01-02";
+    const historicalPath = join(
+      vault,
+      "human",
+      "daily",
+      `${historicalDate}.md`
+    );
+    await page.goto(`${restartedUrl}/daily/${historicalDate}`);
+    await expect(page.getByText("No Daily Note for this day")).toBeVisible();
+    await expect(page.getByTestId("rich-editor")).toHaveCount(0);
+    await expect(readFile(historicalPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+    await page.getByRole("button", { name: "Create Daily Note" }).click();
+    await expect(page.getByTestId("rich-editor")).toBeVisible();
+    await expect(readFile(historicalPath, "utf8")).resolves.toContain(
+      `# ${historicalDate}`
+    );
+    await context.close();
   } finally {
     server?.kill("SIGTERM");
     await rm(temporaryRoot, { recursive: true, force: true });

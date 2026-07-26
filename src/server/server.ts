@@ -6,13 +6,27 @@ import { serve, type ServerType } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 
+import { appConfigSchema } from "../contracts/app-config.js";
+import {
+  dailyNoteResponseSchema,
+  explicitCreationRequiredResponseSchema,
+  saveDailyNoteRequestSchema,
+  staleDailyNoteResponseSchema
+} from "../contracts/daily-note.js";
 import { todayResponseSchema } from "../contracts/today.js";
+import {
+  DailyNotes,
+  ExplicitDailyNoteCreationRequiredError,
+  StaleDailyNoteRevisionError
+} from "../vault/daily-notes.js";
 import { openVault } from "../vault/open.js";
 
 type ServerOptions = {
   vault: string;
   host: string;
   port: number;
+  autosaveDebounceMs: number;
+  autosaveMaxDirtyMs: number;
 };
 
 type ListeningInfo = {
@@ -38,20 +52,87 @@ export async function startServer(
   const vault = await openVault(options.vault);
   const webRoot = fileURLToPath(new URL("../web", import.meta.url));
   const indexPath = fileURLToPath(new URL("../web/index.html", import.meta.url));
+  const dailyNotes = new DailyNotes(vault.path, todayDate);
   const app = new Hono();
 
   app.get("/", (context) => context.redirect("/today"));
-  app.get("/api/v1/today", (context) => {
+  app.get("/api/v1/config", (context) => {
     context.header("Cache-Control", "no-store");
     return context.json(
+      appConfigSchema.parse({
+        autosave: {
+          debounceMs: options.autosaveDebounceMs,
+          maxDirtyMs: options.autosaveMaxDirtyMs
+        }
+      })
+    );
+  });
+  app.get("/api/v1/today", async (context) => {
+    context.header("Cache-Control", "no-store");
+    const dailyNote = await dailyNotes.read(todayDate());
+    return context.json(
       todayResponseSchema.parse({
-        date: todayDate(),
-        exists: false,
+        ...dailyNote,
         vault: {
           id: vault.id,
           name: vault.name
         }
       })
+    );
+  });
+  app.get("/api/v1/daily/:date", async (context) => {
+    context.header("Cache-Control", "no-store");
+    const dailyNote = await dailyNotes.read(context.req.param("date"));
+    return context.json(
+      dailyNoteResponseSchema.parse({
+        ...dailyNote,
+        vault: { id: vault.id, name: vault.name }
+      })
+    );
+  });
+  app.put("/api/v1/daily/:date", async (context) => {
+    const input = saveDailyNoteRequestSchema.parse(await context.req.json());
+    try {
+      const dailyNote = await dailyNotes.save(context.req.param("date"), input);
+      context.header("Cache-Control", "no-store");
+      return context.json(
+        dailyNoteResponseSchema.parse({
+          ...dailyNote,
+          vault: { id: vault.id, name: vault.name }
+        })
+      );
+    } catch (error) {
+      if (error instanceof StaleDailyNoteRevisionError) {
+        context.header("Cache-Control", "no-store");
+        return context.json(
+          staleDailyNoteResponseSchema.parse({
+            error: "stale_revision",
+            currentRevision: error.currentRevision
+          }),
+          409
+        );
+      }
+      if (error instanceof ExplicitDailyNoteCreationRequiredError) {
+        context.header("Cache-Control", "no-store");
+        return context.json(
+          explicitCreationRequiredResponseSchema.parse({
+            error: "explicit_creation_required"
+          }),
+          409
+        );
+      }
+      throw error;
+    }
+  });
+  app.post("/api/v1/daily/:date", async (context) => {
+    const result = await dailyNotes.create(context.req.param("date"));
+    context.header("Cache-Control", "no-store");
+    return context.json(
+      dailyNoteResponseSchema.parse({
+        ...result.note,
+        vault: { id: vault.id, name: vault.name }
+      }),
+      result.created ? 201 : 200
     );
   });
   app.get(
@@ -64,6 +145,14 @@ export async function startServer(
     })
   );
   app.get("/today", async (context) => {
+    const index = await readFile(indexPath, "utf8").catch(() => undefined);
+    if (!index) {
+      return context.text("Fumori Web assets are missing. Reinstall the package.", 500);
+    }
+    context.header("Cache-Control", "no-store");
+    return context.html(index);
+  });
+  app.get("/daily/:date", async (context) => {
     const index = await readFile(indexPath, "utf8").catch(() => undefined);
     if (!index) {
       return context.text("Fumori Web assets are missing. Reinstall the package.", 500);
