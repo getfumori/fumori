@@ -632,13 +632,26 @@ aliases: []
           "--message",
           "Change conflict fixture on current"
         );
-        await execFileAsync("git", [
-          "-C",
-          vault,
-          "merge",
-          "--no-edit",
-          "conflict-other"
-        ]).catch(() => undefined);
+        await expect(
+          git(
+            vault,
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "merge",
+            "--no-edit",
+            "conflict-other"
+          )
+        ).rejects.toThrow();
+        expect(
+          await git(
+            vault,
+            "ls-files",
+            "--unmerged",
+            "human/notes/conflicted.md"
+          )
+        ).not.toBe("");
       },
       diagnostic: "unmerged canonical path"
     },
@@ -676,11 +689,16 @@ aliases: []
         );
         await git(
           vault,
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.com",
           "merge",
           "--no-commit",
           "--no-ff",
           "operation-other"
         );
+        expect(await lstat(join(vault, ".git/MERGE_HEAD"))).toBeDefined();
       },
       diagnostic: "in-progress operation"
     }
