@@ -41,6 +41,16 @@ The end-to-end test packs the npm artifact, installs it outside this checkout,
 uses its real CLI against a temporary Git repository, starts its real server,
 and opens Chromium at the accepted desktop viewports.
 
+The final Foundation qualification is part of `pnpm run test:package`. For each
+of 1280x720 and 1440x900, it creates a fresh real Git Vault containing exactly
+1,000 standalone Human Notes, 365 Daily Notes, and 5,000 mixed links or
+relationships within the accepted 25 MiB Markdown bound. It then repeats the
+Foundation browser journeys, canonical Markdown and Git inspections, restart,
+offline-edit, multi-tab, and crash-recovery checks while enforcing the accepted
+startup, P95 query/read/save/navigation, and checkpoint budgets. The fixture,
+viewport matrix, and budget constants are literal tests; changing a release
+baseline requires an explicit accepted baseline update.
+
 ## Supported platforms
 
 The Foundation npm runtime supports Node.js 24 on Linux x64 and arm64. macOS

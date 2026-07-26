@@ -27,9 +27,14 @@ export type PreparedProjection = {
   dailyNotes: Map<string, ProjectedDailyNote>;
 };
 
+type ProjectedDocument = ProjectedHumanNote | ProjectedDailyNote;
+
 export class InMemoryProjection {
   #humanNotes = new Map<string, ProjectedHumanNote>();
   #dailyNotes = new Map<string, ProjectedDailyNote>();
+  #resolutionIndexDirty = true;
+  #documentsByExactTarget = new Map<string, Set<ProjectedDocument>>();
+  #documentsByLinkKey = new Map<string, Set<ProjectedDocument>>();
   readonly #inboxState: string;
   readonly #archivedState: string;
   readonly #relationships: readonly RelationshipDefinition[];
@@ -46,10 +51,12 @@ export class InMemoryProjection {
 
   publishHumanNote(note: ProjectedHumanNote): void {
     this.#humanNotes.set(note.id, note);
+    this.#resolutionIndexDirty = true;
   }
 
   removeHumanNote(id: string): void {
     this.#humanNotes.delete(id);
+    this.#resolutionIndexDirty = true;
   }
 
   replaceHumanNotes(notes: readonly ProjectedHumanNote[]): void {
@@ -64,6 +71,7 @@ export class InMemoryProjection {
       next.set(note.id, note);
     }
     this.#humanNotes = next;
+    this.#resolutionIndexDirty = true;
   }
 
   prepareAllNotes(
@@ -89,6 +97,7 @@ export class InMemoryProjection {
   replaceAllNotes(prepared: PreparedProjection): void {
     this.#humanNotes = prepared.humanNotes;
     this.#dailyNotes = prepared.dailyNotes;
+    this.#resolutionIndexDirty = true;
   }
 
   humanNote(id: string): ProjectedHumanNote | undefined {
@@ -172,6 +181,7 @@ export class InMemoryProjection {
     const projected = toProjectedDailyNote(note);
     if (projected) {
       this.#dailyNotes.set(note.date, projected);
+      this.#resolutionIndexDirty = true;
     }
   }
 
@@ -294,7 +304,7 @@ export class InMemoryProjection {
     );
   }
 
-  readonlyDocuments(): readonly (ProjectedHumanNote | ProjectedDailyNote)[] {
+  readonlyDocuments(): readonly ProjectedDocument[] {
     return this.#documents();
   }
 
@@ -311,8 +321,38 @@ export class InMemoryProjection {
     }
   }
 
-  #documents(): Array<ProjectedHumanNote | ProjectedDailyNote> {
+  #documents(): ProjectedDocument[] {
     return [...this.#humanNotes.values(), ...this.#dailyNotes.values()];
+  }
+
+  #ensureResolutionIndex(): void {
+    if (!this.#resolutionIndexDirty) {
+      return;
+    }
+    const exactTargets = new Map<string, Set<ProjectedDocument>>();
+    const linkKeys = new Map<string, Set<ProjectedDocument>>();
+    const add = (
+      index: Map<string, Set<ProjectedDocument>>,
+      key: string,
+      note: ProjectedDocument
+    ) => {
+      const matches = index.get(key) ?? new Set<ProjectedDocument>();
+      matches.add(note);
+      index.set(key, matches);
+    };
+    for (const note of this.#documents()) {
+      const filename = note.canonicalPath
+        .split("/")
+        .at(-1)!
+        .replace(/\.md$/, "");
+      for (const candidate of [note.title, filename, ...note.aliases]) {
+        add(exactTargets, candidate.toLocaleLowerCase(), note);
+        add(linkKeys, linkKey(candidate), note);
+      }
+    }
+    this.#documentsByExactTarget = exactTargets;
+    this.#documentsByLinkKey = linkKeys;
+    this.#resolutionIndexDirty = false;
   }
 
   #linkResolvesTo(
@@ -331,17 +371,14 @@ export class InMemoryProjection {
     label: string;
     sourceMarkdown: string;
   }): ResolvedWikilink {
+    this.#ensureResolutionIndex();
     const normalized = link.target.toLocaleLowerCase();
     const normalizedKey = linkKey(link.target);
-    const matches = this.#documents().filter((note) => {
-      const filename = note.canonicalPath.split("/").at(-1)!.replace(/\.md$/, "");
-      return [note.title, filename, ...note.aliases].some((candidate) => {
-        return (
-          candidate.toLocaleLowerCase() === normalized ||
-          linkKey(candidate) === normalizedKey
-        );
-      });
-    });
+    const candidates = new Set<ProjectedDocument>([
+      ...(this.#documentsByExactTarget.get(normalized) ?? []),
+      ...(this.#documentsByLinkKey.get(normalizedKey) ?? [])
+    ]);
+    const matches = this.#documents().filter((note) => candidates.has(note));
     return {
       ...link,
       status:
