@@ -41,7 +41,12 @@ async function makeVault(): Promise<string> {
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories.splice(0).map((path) =>
-      rm(path, { recursive: true, force: true })
+      rm(path, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100
+      })
     )
   );
 });
