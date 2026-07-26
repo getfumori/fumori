@@ -36,6 +36,13 @@ async function startFumoriServer(
   vault: string,
   extraArguments: string[] = []
 ): Promise<string> {
+  return (await startFumoriServerWithOutput(vault, extraArguments)).url;
+}
+
+async function startFumoriServerWithOutput(
+  vault: string,
+  extraArguments: string[] = []
+): Promise<{ url: string; stderr: string }> {
   const child = spawn(
     process.execPath,
     [
@@ -55,7 +62,13 @@ async function startFumoriServer(
     }
   );
   servers.push(child);
-  return waitForFumoriServer(child);
+  let stderr = "";
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  const url = await waitForFumoriServer(child);
+  return { url, stderr };
 }
 
 afterEach(async () => {
@@ -72,9 +85,10 @@ afterEach(async () => {
 describe("fumori serve", () => {
   test("opens only the configured Vault and exposes Today as virtual state", async () => {
     const vault = await makeBootstrappedVault();
-    const url = await startFumoriServer(vault);
+    const { url, stderr } = await startFumoriServerWithOutput(vault);
 
     expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(stderr).toBe("");
     const rootResponse = await fetch(url, { redirect: "manual" });
     expect(rootResponse.status).toBe(302);
     expect(rootResponse.headers.get("location")).toBe("/today");
@@ -106,6 +120,23 @@ describe("fumori serve", () => {
       "--porcelain"
     ]);
     expect(status).toBe("");
+  });
+
+  test("warns clearly when explicitly bound beyond loopback", async () => {
+    const vault = await makeBootstrappedVault();
+    const { url, stderr } = await startFumoriServerWithOutput(vault, [
+      "--host",
+      "0.0.0.0"
+    ]);
+
+    expect(url).toMatch(/^http:\/\/0\.0\.0\.0:\d+$/);
+    expect(stderr).toBe(
+      [
+        'Warning: Fumori is listening on non-loopback host "0.0.0.0".',
+        "Foundation provides neither authentication nor TLS.",
+        "Use only a trusted network or place Fumori behind an authenticated gateway.\n"
+      ].join(" ")
+    );
   });
 
   test("publishes the default autosave policy", async () => {

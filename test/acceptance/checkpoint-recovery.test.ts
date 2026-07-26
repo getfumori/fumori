@@ -15,17 +15,15 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, test } from "vitest";
 
+import {
+  runGit as git,
+  stopChildProcess
+} from "../helpers/subprocess.js";
 import { waitForFumoriServer } from "../helpers/wait-for-fumori-server.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
 const servers: ChildProcess[] = [];
-
-async function git(repository: string, ...arguments_: string[]): Promise<string> {
-  return (
-    await execFileAsync("git", ["-C", repository, ...arguments_])
-  ).stdout;
-}
 
 async function makeVault(): Promise<string> {
   const repository = await mkdtemp(join(tmpdir(), "fumori-checkpoint-"));
@@ -74,14 +72,11 @@ async function startServer(
 }
 
 async function stopServer(child: ChildProcess, signal: NodeJS.Signals): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
+  await stopChildProcess(child, signal);
+  const index = servers.indexOf(child);
+  if (index >= 0) {
+    servers.splice(index, 1);
   }
-  await new Promise<void>((resolve) => {
-    child.once("exit", () => resolve());
-    child.kill(signal);
-  });
-  servers.splice(servers.indexOf(child), 1);
 }
 
 async function startupFailure(vault: string): Promise<string> {

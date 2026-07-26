@@ -7,55 +7,18 @@ import { promisify } from "node:util";
 
 import { expect, test } from "@playwright/test";
 
+import { packAndInstallFumori } from "../test/helpers/packed-fumori.js";
+import {
+  runGit,
+  stopChildProcess
+} from "../test/helpers/subprocess.js";
 import { waitForFumoriServer } from "../test/helpers/wait-for-fumori-server.js";
 
 const execFileAsync = promisify(execFile);
-
-async function packAndInstall(root: string): Promise<string> {
-  const packageDirectory = join(root, "package");
-  const installDirectory = join(root, "consumer");
-  await Promise.all([
-    import("node:fs/promises").then(({ mkdir }) =>
-      mkdir(packageDirectory, { recursive: true })
-    ),
-    import("node:fs/promises").then(({ mkdir }) =>
-      mkdir(installDirectory, { recursive: true })
-    )
-  ]);
-
-  const { stdout } = await execFileAsync(
-    "npm",
-    ["--silent", "pack", "--json", "--pack-destination", packageDirectory],
-    { cwd: process.cwd(), maxBuffer: 10 * 1024 * 1024 }
-  );
-  const jsonStart = stdout.lastIndexOf("\n[\n  {");
-  const json = stdout.slice(jsonStart >= 0 ? jsonStart + 1 : 0);
-  const packages = JSON.parse(json) as Array<{ filename: string }>;
-  const filename = packages[0]?.filename;
-  if (!filename) {
-    throw new Error("npm pack did not produce an artifact");
-  }
-  const artifact = join(packageDirectory, filename);
-
-  await execFileAsync("npm", ["init", "--yes"], { cwd: installDirectory });
-  await execFileAsync(
-    "npm",
-    ["install", "--ignore-scripts", "--no-audit", "--no-fund", artifact],
-    { cwd: installDirectory, maxBuffer: 10 * 1024 * 1024 }
-  );
-  return join(installDirectory, "node_modules", ".bin", "fumori");
-}
-
-async function stopServer(server: ChildProcess): Promise<void> {
-  if (server.exitCode !== null) {
-    return;
-  }
-  const exited = new Promise<void>((resolve) => {
-    server.once("exit", () => resolve());
-  });
-  server.kill("SIGTERM");
-  await exited;
-}
+const FOUNDATION_DESKTOP_VIEWPORTS = [
+  { width: 1280, height: 720 },
+  { width: 1440, height: 900 }
+] as const;
 
 test("the packed CLI edits canonical Daily Notes through Chromium", async ({
   browser
@@ -65,7 +28,7 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
   let server: ChildProcess | undefined;
 
   try {
-    const fumori = await packAndInstall(temporaryRoot);
+    const { executable: fumori } = await packAndInstallFumori(temporaryRoot);
     const vault = join(temporaryRoot, "vault");
     await execFileAsync("git", ["init", "--quiet", vault]);
     await execFileAsync(fumori, ["vault", "bootstrap", "--path", vault], {
@@ -81,10 +44,7 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
       timeoutMs: 20_000
     });
 
-    for (const viewport of [
-      { width: 1280, height: 720 },
-      { width: 1440, height: 900 }
-    ]) {
+    for (const viewport of FOUNDATION_DESKTOP_VIEWPORTS) {
       const context = await browser.newContext({ viewport });
       const page = await context.newPage();
       await page.goto(url);
@@ -103,6 +63,18 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
         ).map((label) => label.trim())
       ).toEqual(["Today", "Notes", "Inbox", "Types", "Views", "Archive"]);
       await expect(page.getByText("No Daily Note yet")).toBeVisible();
+      const richEditor = page
+        .getByTestId("rich-editor")
+        .locator("[contenteditable='true']");
+      await expect(richEditor).toBeInViewport();
+      await expect(
+        page.getByRole("button", { name: "Inspector" })
+      ).toBeInViewport();
+      await page.getByRole("button", { name: "Inspector" }).click();
+      await expect(
+        page.getByRole("form", { name: "Document inspector" })
+      ).toBeInViewport();
+      await page.getByRole("button", { name: "Close inspector" }).click();
       expect(
         await page.evaluate(
           () => document.documentElement.scrollWidth <= window.innerWidth
@@ -325,7 +297,11 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
       createHash("sha256").update(persistedCanonical).digest("hex")
     );
 
-    await stopServer(server);
+    const headBeforeInterruption = (
+      await runGit(vault, "rev-parse", "HEAD")
+    ).trim();
+    expect(await runGit(vault, "status", "--porcelain")).not.toBe("");
+    await stopChildProcess(server, "SIGKILL");
     const projectTypePath = join(
       vault,
       ".second-brain",
@@ -419,6 +395,12 @@ target_types: [note]
       label: "Restarted packed Fumori server",
       timeoutMs: 20_000
     });
+    const recoveryHead = (await runGit(vault, "rev-parse", "HEAD")).trim();
+    expect(recoveryHead).not.toBe(headBeforeInterruption);
+    expect((await runGit(vault, "log", "-1", "--pretty=%s")).trim()).toBe(
+      "Recovery checkpoint"
+    );
+    expect(await runGit(vault, "status", "--porcelain")).toBe("");
     await page.goto(restartedUrl);
     await expect(
       page.getByTestId("rich-editor").getByText("Rich re-edit survives.")
@@ -467,6 +449,38 @@ target_types: [note]
       }
     );
     expect(seedUnsupported.status).toBe(200);
+    const checkpointResponse = await fetch(
+      `${restartedUrl}/api/v1/checkpoint`,
+      { method: "POST" }
+    );
+    expect(checkpointResponse.status).toBe(200);
+    expect(checkpointResponse.headers.get("cache-control")).toContain(
+      "no-store"
+    );
+    const checkpoint = (await checkpointResponse.json()) as {
+      changedFileCount: number;
+      created: boolean;
+      sha: string | null;
+    };
+    expect(checkpoint).toEqual({
+      changedFileCount: 1,
+      created: true,
+      sha: expect.stringMatching(/^[0-9a-f]{40}$/)
+    });
+    expect((await runGit(vault, "rev-parse", "HEAD")).trim()).toBe(checkpoint.sha);
+    expect((await runGit(vault, "log", "-1", "--pretty=%s")).trim()).toBe(
+      "Checkpoint Vault"
+    );
+    expect(await runGit(vault, "status", "--porcelain")).toBe("");
+    const cleanCheckpointResponse = await fetch(
+      `${restartedUrl}/api/v1/checkpoint`,
+      { method: "POST" }
+    );
+    await expect(cleanCheckpointResponse.json()).resolves.toEqual({
+      changedFileCount: 0,
+      created: false,
+      sha: null
+    });
     await page.reload();
 
     const unsupportedRichEditor = page.getByTestId("rich-editor");
@@ -562,7 +576,7 @@ target_types: [note]
       .toContain("Rich edit after Raw survives.");
     expect(await readFile(dailyPath, "utf8")).toContain("weather: rainy");
 
-    await stopServer(server);
+    await stopChildProcess(server);
     server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
       cwd: temporaryRoot,
       stdio: ["ignore", "pipe", "pipe"]
@@ -848,10 +862,31 @@ target_types: [note]
     await expect(
       page.getByRole("link", { name: todayPayload.date })
     ).toContainText("Raw edit survives");
+    expect(
+      await page.evaluate(async () => ({
+        cacheNames: "caches" in window ? await caches.keys() : [],
+        indexedDatabases:
+          typeof indexedDB.databases === "function"
+            ? (await indexedDB.databases()).map((database) => database.name)
+            : [],
+        localStorageKeys: Object.keys(localStorage),
+        serviceWorkerRegistrations:
+          "serviceWorker" in navigator
+            ? (await navigator.serviceWorker.getRegistrations()).length
+            : 0,
+        sessionStorageKeys: Object.keys(sessionStorage)
+      }))
+    ).toEqual({
+      cacheNames: [],
+      indexedDatabases: [],
+      localStorageKeys: [],
+      serviceWorkerRegistrations: 0,
+      sessionStorageKeys: []
+    });
     await context.close();
   } finally {
     if (server) {
-      await stopServer(server);
+      await stopChildProcess(server);
     }
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -865,7 +900,7 @@ test("two tabs resolve stale Human Note drafts without silent overwrite", async 
   let server: ChildProcess | undefined;
 
   try {
-    const fumori = await packAndInstall(temporaryRoot);
+    const { executable: fumori } = await packAndInstallFumori(temporaryRoot);
     const vault = join(temporaryRoot, "vault");
     await execFileAsync("git", ["init", "--quiet", vault]);
     await execFileAsync(fumori, ["vault", "bootstrap", "--path", vault], {
@@ -888,7 +923,7 @@ test("two tabs resolve stale Human Note drafts without silent overwrite", async 
     ).json()) as { id: string };
     const noteUrl = `${url}/notes/${created.id}`;
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 }
+      viewport: { width: 1280, height: 720 }
     });
     const firstTab = await context.newPage();
     const secondTab = await context.newPage();
@@ -956,6 +991,24 @@ test("two tabs resolve stale Human Note drafts without silent overwrite", async 
       adoptDialog.getByRole("textbox", { name: "Current saved content" })
     ).toHaveValue(currentToAdopt);
     await expect(adoptDialog).not.toContainText(/\b(?:Git|branch|merge)\b/i);
+    for (const viewport of FOUNDATION_DESKTOP_VIEWPORTS) {
+      await secondTab.setViewportSize(viewport);
+      for (const name of [
+        "Close",
+        "Use current saved content",
+        "Replace with my draft",
+        "Combine manually"
+      ]) {
+        await expect(
+          adoptDialog.getByRole("button", { name })
+        ).toBeInViewport();
+      }
+      expect(
+        await secondTab.evaluate(
+          () => document.documentElement.scrollWidth <= window.innerWidth
+        )
+      ).toBe(true);
+    }
     await adoptDialog.getByRole("button", { name: "Close" }).click();
     await expect(adoptDialog).not.toBeVisible();
     const completeLocalDraft = withBody(
@@ -1038,7 +1091,7 @@ test("two tabs resolve stale Human Note drafts without silent overwrite", async 
     await context.close();
   } finally {
     if (server) {
-      await stopServer(server);
+      await stopChildProcess(server);
     }
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -1052,7 +1105,7 @@ test("the packed CLI archives and deletes a linked Human Note through Chromium",
   let server: ChildProcess | undefined;
 
   try {
-    const fumori = await packAndInstall(temporaryRoot);
+    const { executable: fumori } = await packAndInstallFumori(temporaryRoot);
     const vault = join(temporaryRoot, "vault");
     await execFileAsync("git", ["init", "--quiet", vault]);
     await execFileAsync(fumori, ["vault", "bootstrap", "--path", vault], {
@@ -1123,7 +1176,7 @@ test("the packed CLI archives and deletes a linked Human Note through Chromium",
     await page.getByRole("link", { name: "Inbox", exact: true }).click();
     await expect(page.getByRole("link", { name: "Cedar" })).toHaveCount(0);
 
-    await stopServer(server);
+    await stopChildProcess(server);
     server = undefined;
     server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
       cwd: temporaryRoot,
@@ -1167,7 +1220,7 @@ test("the packed CLI archives and deletes a linked Human Note through Chromium",
     await expect(inspector.getByRole("button", { name: /Cedar unresolved/ }))
       .toBeVisible();
 
-    await stopServer(server);
+    await stopChildProcess(server);
     server = undefined;
     server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
       cwd: temporaryRoot,
@@ -1188,7 +1241,7 @@ test("the packed CLI archives and deletes a linked Human Note through Chromium",
     await context.close();
   } finally {
     if (server) {
-      await stopServer(server);
+      await stopChildProcess(server);
     }
     await rm(temporaryRoot, { recursive: true, force: true });
   }

@@ -444,7 +444,11 @@ export async function startServer(
 
   if (!isLoopback(options.host)) {
     process.stderr.write(
-      "Warning: Fumori provides neither authentication nor TLS. Use a trusted network or authenticated gateway.\n"
+      [
+        `Warning: Fumori is listening on non-loopback host "${options.host}".`,
+        "Foundation provides neither authentication nor TLS.",
+        "Use only a trusted network or place Fumori behind an authenticated gateway.\n"
+      ].join(" ")
     );
   }
 

@@ -30,10 +30,17 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      - name: Install the locked pnpm workspace
+        run: pnpm install --frozen-lockfile
 
-      - run: pnpm run typecheck
+      - name: Typecheck Node.js, Web, and test targets
+        run: pnpm run typecheck
 
-      - run: pnpm exec playwright install --with-deps chromium
+      - name: Install current stable Chromium
+        run: pnpm exec playwright install --with-deps chromium
 
-      - run: pnpm test
+      - name: Run source acceptance tests
+        run: pnpm run test:unit
+
+      - name: Build, pack, install, and smoke the npm artifact
+        run: pnpm run test:package

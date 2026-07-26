@@ -19,8 +19,9 @@ npx fumori serve --vault ~/fumori-vault
 ```
 
 The server binds to `127.0.0.1:3000` by default. Passing `--host` explicitly can
-expose it elsewhere, but this Foundation tracer provides neither
-authentication nor TLS.
+expose it elsewhere and emits a warning: Foundation provides neither
+authentication nor TLS. A non-loopback listener must run only on a trusted
+network or behind an authenticated gateway.
 
 Bootstrap creates the canonical Vault Manifest, neutral Core Model, reserved
 ownership zones, and one initial Git commit. Opening a missing Today surface is
@@ -39,6 +40,16 @@ corepack pnpm test
 The end-to-end test packs the npm artifact, installs it outside this checkout,
 uses its real CLI against a temporary Git repository, starts its real server,
 and opens Chromium at the accepted desktop viewports.
+
+## Supported platforms
+
+The Foundation npm runtime supports Node.js 24 on Linux x64 and arm64. macOS
+arm64 is supported for development, local use, and package smoke testing.
+Fumori requires the system Git CLI and no external database, hosted control
+plane, Docker, or other container runtime.
+
+Windows, WSL, Safari, Firefox, mobile browsers, installed-PWA behavior, and OCI
+or orchestration distributions are outside the Foundation release gate.
 
 ## Project documents
 

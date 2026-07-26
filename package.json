@@ -22,7 +22,8 @@
     "prepack": "pnpm run build",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && vue-tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.tests.json",
     "test:unit": "vitest run",
-    "test:e2e": "pnpm run build && playwright test",
+    "test:package": "pnpm run build && playwright test",
+    "test:e2e": "pnpm run test:package",
     "test": "pnpm run test:unit && pnpm run test:e2e"
   },
   "dependencies": {
