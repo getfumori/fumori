@@ -132,6 +132,8 @@ export const typeDefinitionListResponseSchema = z.array(typeDefinitionSchema);
 export const savedViewListResponseSchema = z.array(savedViewSchema);
 export const organizationModelResponseSchema = z.object({
   states: z.array(z.string().min(1)),
+  standaloneCreationState: z.string().min(1),
+  archivedState: z.string().min(1),
   types: z.array(typeDefinitionSchema),
   relationships: z.array(relationshipDefinitionSchema),
   views: z.array(savedViewSchema)

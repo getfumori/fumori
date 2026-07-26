@@ -21,6 +21,8 @@ import {
 } from "../contracts/daily-note.js";
 import {
   createHumanNoteRequestSchema,
+  deleteHumanNoteRequestSchema,
+  humanNoteDeletionImpactResponseSchema,
   humanNoteListResponseSchema,
   humanNoteResponseSchema,
   saveHumanNoteRequestSchema
@@ -39,6 +41,7 @@ import {
 import { todayResponseSchema } from "../contracts/today.js";
 import {
   ExplicitDailyNoteCreationRequiredError,
+  HumanNoteDeletionImpactChangedError,
   HumanNoteNotFoundError,
   InvalidDailyNoteMarkdownError,
   InvalidHumanNoteMarkdownError,
@@ -218,6 +221,22 @@ export async function startServer(
       })
     );
   });
+  app.get("/api/v1/notes/:id/deletion-impact", async (context) => {
+    try {
+      const impact = await vault.humanNoteDeletionImpact(
+        context.req.param("id")
+      );
+      context.header("Cache-Control", "no-store");
+      return context.json(
+        humanNoteDeletionImpactResponseSchema.parse(impact)
+      );
+    } catch (error) {
+      if (error instanceof HumanNoteNotFoundError) {
+        return context.json({ error: "not_found" }, 404);
+      }
+      throw error;
+    }
+  });
   app.get("/api/v1/notes/:id/connections", (context) => {
     const connections = vault.noteConnections(context.req.param("id"));
     if (!connections) {
@@ -313,10 +332,48 @@ export async function startServer(
       throw error;
     }
   });
+  app.delete("/api/v1/notes/:id", async (context) => {
+    const input = deleteHumanNoteRequestSchema.parse(await context.req.json());
+    try {
+      await vault.deleteHumanNote(context.req.param("id"), input);
+      context.header("Cache-Control", "no-store");
+      return context.body(null, 204);
+    } catch (error) {
+      context.header("Cache-Control", "no-store");
+      if (error instanceof HumanNoteNotFoundError) {
+        return context.json({ error: "not_found" }, 404);
+      }
+      if (error instanceof StaleHumanNoteRevisionError) {
+        return context.json(
+          {
+            error: "stale_revision",
+            currentRevision: error.currentRevision
+          },
+          409
+        );
+      }
+      if (error instanceof HumanNoteDeletionImpactChangedError) {
+        return context.json(
+          {
+            error: "deletion_impact_changed",
+            currentIncomingLinkCount: error.currentIncomingLinkCount
+          },
+          409
+        );
+      }
+      throw error;
+    }
+  });
   app.get("/api/v1/inbox", (context) => {
     context.header("Cache-Control", "no-store");
     return context.json(
       humanNoteListResponseSchema.parse(vault.humanNoteLists().inbox)
+    );
+  });
+  app.get("/api/v1/archive", (context) => {
+    context.header("Cache-Control", "no-store");
+    return context.json(
+      humanNoteListResponseSchema.parse(vault.humanNoteLists().archive)
     );
   });
   app.get("/api/v1/types", (context) => {
@@ -368,6 +425,7 @@ export async function startServer(
   app.get("/notes", serveWebApp);
   app.get("/notes/:id", serveWebApp);
   app.get("/inbox", serveWebApp);
+  app.get("/archive", serveWebApp);
   app.get("/search", serveWebApp);
   app.get("/types", serveWebApp);
   app.get("/types/:key", serveWebApp);

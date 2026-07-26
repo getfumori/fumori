@@ -21,6 +21,7 @@ import { dailyNoteResponseSchema } from "../contracts/daily-note";
 import {
   type HumanNoteListItem,
   type HumanNoteResponse,
+  humanNoteDeletionImpactResponseSchema,
   humanNoteListResponseSchema,
   humanNoteResponseSchema
 } from "../contracts/human-note";
@@ -54,6 +55,7 @@ type EditorMode = "rich" | "raw" | "protected";
 type KnowledgeMode =
   | "notes"
   | "inbox"
+  | "archive"
   | "note"
   | "search"
   | "types"
@@ -74,6 +76,8 @@ const mode: KnowledgeMode = humanNoteMatch
       ? "view"
   : window.location.pathname === "/inbox"
     ? "inbox"
+    : window.location.pathname === "/archive"
+      ? "archive"
     : window.location.pathname === "/search"
       ? "search"
       : window.location.pathname === "/types"
@@ -104,10 +108,27 @@ const connections = ref<NoteConnections>();
 const wikilinkSuggestions = ref<
   Array<{ target: string; title: string; url: string }>
 >([]);
+const deletionImpact = ref<{
+  id: string;
+  revision: string;
+  incomingLinkCount: number;
+}>();
 let searchSequence = 0;
+const isArchived = computed(
+  () =>
+    humanNote.value !== undefined &&
+    model.value !== undefined &&
+    humanNote.value.state === model.value.archivedState
+);
 
 const sectionTitle = computed(() => {
   if (mode === "inbox") return "Inbox";
+  if (
+    mode === "archive" ||
+    (mode === "note" && isArchived.value)
+  ) {
+    return "Archive";
+  }
   if (mode === "search") return "Search";
   if (mode === "types" || mode === "type") return "Types";
   if (mode === "views" || mode === "view") return "Views";
@@ -116,6 +137,8 @@ const sectionTitle = computed(() => {
 const activeNavigation = computed(() =>
   mode === "inbox"
     ? "inbox" as const
+    : mode === "archive" || isArchived.value
+      ? "archive" as const
     : mode === "types" || mode === "type"
       ? "types" as const
       : mode === "views" || mode === "view"
@@ -241,10 +264,16 @@ async function load(): Promise<void> {
     ).vault.name;
 
     if (mode === "note") {
-      const [noteResponse, listResponse, connectionsResponse, suggestionsResponse] =
-        await Promise.all([
+      const [
+        noteResponse,
+        notesResponse,
+        archiveResponse,
+        connectionsResponse,
+        suggestionsResponse
+      ] = await Promise.all([
         fetch(`/api/v1/notes/${humanNoteMatch![1]}`, { cache: "no-store" }),
         fetch("/api/v1/notes", { cache: "no-store" }),
+        fetch("/api/v1/archive", { cache: "no-store" }),
         fetch(`/api/v1/connections/${humanNoteMatch![1]}`, {
           cache: "no-store"
         }),
@@ -255,7 +284,11 @@ async function load(): Promise<void> {
       }
       humanNote.value = humanNoteResponseSchema.parse(await noteResponse.json());
       noteList.value = humanNoteListResponseSchema.parse(
-        await listResponse.json()
+        await (
+          isArchived.value
+            ? archiveResponse
+            : notesResponse
+        ).json()
       );
       connections.value = noteConnectionsResponseSchema.parse(
         await connectionsResponse.json()
@@ -313,7 +346,11 @@ async function load(): Promise<void> {
     }
 
     const response = await fetch(
-      mode === "inbox" ? "/api/v1/inbox" : "/api/v1/notes",
+      mode === "inbox"
+        ? "/api/v1/inbox"
+        : mode === "archive"
+          ? "/api/v1/archive"
+          : "/api/v1/notes",
       { cache: "no-store" }
     );
     if (!response.ok) {
@@ -461,6 +498,90 @@ async function renameToTitle(): Promise<void> {
     saveStatus.value = "saved";
   } catch (reason) {
     saveError.value = explainError(reason, "The note was not renamed.");
+    saveStatus.value = "error";
+  }
+}
+
+async function setLifecycleState(state: string): Promise<void> {
+  if (!humanNote.value || !model.value) return;
+  const archiving = state === model.value.archivedState;
+  try {
+    await autosave.value?.flush();
+    updateMetadata((note) => ({ ...note, state }));
+    await autosave.value?.flush();
+    await navigateTo(archiving ? "/archive" : "/notes");
+  } catch (reason) {
+    saveError.value = explainError(
+      reason,
+      `The note was not ${archiving ? "archived" : "unarchived"}.`
+    );
+    saveStatus.value = "error";
+  }
+}
+
+async function prepareDelete(): Promise<void> {
+  if (!humanNote.value) return;
+  try {
+    await autosave.value?.flush();
+    const response = await fetch(
+      `/api/v1/notes/${humanNote.value.id}/deletion-impact`,
+      { cache: "no-store" }
+    );
+    if (!response.ok) {
+      throw new Error(`Delete impact request failed (${response.status})`);
+    }
+    deletionImpact.value = humanNoteDeletionImpactResponseSchema.parse(
+      await response.json()
+    );
+  } catch (reason) {
+    saveError.value = explainError(
+      reason,
+      "The note's incoming-link impact could not be checked."
+    );
+    saveStatus.value = "error";
+  }
+}
+
+async function deleteHumanNote(): Promise<void> {
+  if (!humanNote.value || !deletionImpact.value) return;
+  try {
+    const response = await fetch(`/api/v1/notes/${humanNote.value.id}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        baseRevision: deletionImpact.value.revision,
+        confirmedIncomingLinkCount: deletionImpact.value.incomingLinkCount
+      })
+    });
+    if (!response.ok) {
+      const detail = (await response.json().catch(() => undefined)) as
+        | {
+            error?: string;
+            currentIncomingLinkCount?: number;
+          }
+        | undefined;
+      if (
+        detail?.error === "deletion_impact_changed" &&
+        detail.currentIncomingLinkCount !== undefined
+      ) {
+        deletionImpact.value = {
+          ...deletionImpact.value,
+          incomingLinkCount: detail.currentIncomingLinkCount
+        };
+        throw new Error(
+          "Incoming links changed. Review the updated count before confirming again."
+        );
+      }
+      throw new Error(
+        detail?.error === "stale_revision"
+          ? "This note changed elsewhere. Reload before deleting it."
+          : `Delete failed (${response.status})`
+      );
+    }
+    deletionImpact.value = undefined;
+    window.location.assign("/notes");
+  } catch (reason) {
+    saveError.value = explainError(reason, "The note was not deleted.");
     saveStatus.value = "error";
   }
 }
@@ -733,6 +854,8 @@ onBeforeUnmount(() => {
           {{
             mode === "inbox"
               ? "Captured notes will gather here."
+              : mode === "archive"
+                ? "Archived notes will gather here."
               : "Your standalone notes will gather here."
           }}
         </p>
@@ -780,6 +903,30 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="editor-mode-button"
+            @click="
+              setLifecycleState(
+                isArchived
+                  ? model!.standaloneCreationState
+                  : model!.archivedState
+              )
+            "
+          >
+            {{
+              isArchived
+                ? "Unarchive note"
+                : "Archive note"
+            }}
+          </button>
+          <button
+            type="button"
+            class="editor-mode-button danger-button"
+            @click="prepareDelete"
+          >
+            Delete note
+          </button>
+          <button
+            type="button"
+            class="editor-mode-button"
             @click="editorMode === 'raw' ? switchToRich() : switchToRaw()"
           >
             {{
@@ -804,6 +951,39 @@ onBeforeUnmount(() => {
       </div>
 
       <section v-else-if="humanNote" class="document human-document">
+        <dialog
+          :open="deletionImpact !== undefined"
+          class="delete-note-dialog"
+          aria-labelledby="delete-note-title"
+        >
+          <template v-if="deletionImpact">
+            <p class="eyebrow">Permanent deletion</p>
+            <h2 id="delete-note-title">Delete {{ humanNote.title }}?</h2>
+            <p>
+              {{
+                deletionImpact.incomingLinkCount === 1
+                  ? "1 incoming link will become unresolved."
+                  : `${deletionImpact.incomingLinkCount} incoming links will become unresolved.`
+              }}
+            </p>
+            <p>
+              The note's canonical file will be removed. Fumori will not
+              rewrite references or keep a note trash.
+            </p>
+            <div class="dialog-actions">
+              <button type="button" @click="deletionImpact = undefined">
+                Cancel
+              </button>
+              <button
+                type="button"
+                class="danger-button"
+                @click="deleteHumanNote"
+              >
+                Delete permanently
+              </button>
+            </div>
+          </template>
+        </dialog>
         <p class="document-date">Standalone Human Note</p>
         <h1>{{ humanNote.title }}</h1>
         <p class="canonical-path">{{ humanNote.canonicalPath }}</p>

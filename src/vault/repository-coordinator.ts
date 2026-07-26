@@ -173,6 +173,20 @@ export class RepositoryCoordinator {
     }
   }
 
+  async publishDeletion(
+    path: string,
+    beforeSource: string,
+    afterPublication: () => void
+  ): Promise<void> {
+    await this.runRead(async () => {
+      if ((await readFile(path, "utf8")) !== beforeSource) {
+        throw new Error(`Deletion target changed: ${path}`);
+      }
+      await rm(path);
+      afterPublication();
+    });
+  }
+
   async publishTransaction(
     files: readonly TransactionFile[],
     message: string,

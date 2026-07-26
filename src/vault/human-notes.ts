@@ -12,7 +12,10 @@ import { basename, join } from "node:path";
 import { parseDocument, type Document } from "yaml";
 import { z } from "zod";
 
-import type { SaveHumanNoteRequest } from "../contracts/human-note.js";
+import type {
+  DeleteHumanNoteRequest,
+  SaveHumanNoteRequest
+} from "../contracts/human-note.js";
 import {
   organizationModelValueMatches,
   type OrganizationModelValue,
@@ -49,6 +52,12 @@ export class StaleHumanNoteRevisionError extends Error {
 }
 
 export class InvalidHumanNoteMarkdownError extends Error {}
+
+export class HumanNoteDeletionImpactChangedError extends Error {
+  constructor(readonly currentIncomingLinkCount: number) {
+    super("The incoming-link impact changed after confirmation");
+  }
+}
 
 function workingRevision(source: string): string {
   return createHash("sha256").update(source).digest("hex");
@@ -614,6 +623,43 @@ export class HumanNotes {
 
   lists(): ReturnType<InMemoryProjection["humanNoteLists"]> {
     return this.#projection.humanNoteLists();
+  }
+
+  async deletionImpact(
+    id: string
+  ): Promise<{ id: string; revision: string; incomingLinkCount: number }> {
+    return this.#coordinator.runRead(async () => {
+      const note = await this.#readUnlocked(id);
+      const incomingLinkCount = this.#projection.incomingLinkCount(id);
+      if (!note || incomingLinkCount === undefined) {
+        throw new HumanNoteNotFoundError();
+      }
+      return { id, revision: note.revision, incomingLinkCount };
+    });
+  }
+
+  async delete(id: string, input: DeleteHumanNoteRequest): Promise<void> {
+    await this.#withWriteLock(async () => {
+      const current = this.#projection.humanNote(id);
+      if (!current) {
+        throw new HumanNoteNotFoundError();
+      }
+      if (current.revision !== input.baseRevision) {
+        throw new StaleHumanNoteRevisionError(current.revision);
+      }
+      const incomingLinkCount = this.#projection.incomingLinkCount(id);
+      if (incomingLinkCount === undefined) {
+        throw new HumanNoteNotFoundError();
+      }
+      if (incomingLinkCount !== input.confirmedIncomingLinkCount) {
+        throw new HumanNoteDeletionImpactChangedError(incomingLinkCount);
+      }
+      await this.#coordinator.publishDeletion(
+        join(this.#directory, basename(current.canonicalPath)),
+        current.sourceMarkdown,
+        () => this.#projection.removeHumanNote(id)
+      );
+    });
   }
 
   async renameToTitle(

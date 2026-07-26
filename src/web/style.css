@@ -614,6 +614,60 @@ kbd {
   outline-offset: 2px;
 }
 
+.danger-button {
+  border-color: #d9b9b2;
+  color: #8b493e;
+  background: #fff8f6;
+}
+
+.danger-button:hover {
+  border-color: #c98d82;
+  background: #fff0ed;
+}
+
+.delete-note-dialog {
+  position: fixed;
+  z-index: 20;
+  top: 50%;
+  left: 50%;
+  width: min(440px, calc(100vw - 48px));
+  margin: 0;
+  padding: 28px;
+  transform: translate(-50%, -50%);
+  border: 1px solid #d8d9d1;
+  border-radius: 14px;
+  color: #4f5c55;
+  background: var(--ivory-100);
+  box-shadow: 0 24px 80px rgba(24, 42, 31, 0.24);
+}
+
+.delete-note-dialog h2 {
+  margin: 8px 0 14px;
+  color: var(--forest-950);
+  font-family: ui-serif, Georgia, serif;
+  font-size: 26px;
+  font-weight: 500;
+}
+
+.delete-note-dialog p {
+  line-height: 1.55;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.dialog-actions button {
+  padding: 8px 12px;
+  border: 1px solid #d6d9d2;
+  border-radius: 7px;
+  font: inherit;
+  cursor: pointer;
+}
+
 .more-button {
   display: flex;
   align-items: center;

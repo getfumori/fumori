@@ -1,5 +1,8 @@
 import type { SaveDailyNoteRequest } from "../contracts/daily-note.js";
-import type { SaveHumanNoteRequest } from "../contracts/human-note.js";
+import type {
+  DeleteHumanNoteRequest,
+  SaveHumanNoteRequest
+} from "../contracts/human-note.js";
 import type {
   QuerySpec,
   SavedView,
@@ -28,6 +31,7 @@ export {
   StaleDailyNoteRevisionError
 } from "./daily-notes.js";
 export {
+  HumanNoteDeletionImpactChangedError,
   HumanNoteNotFoundError,
   InvalidHumanNoteMarkdownError,
   StaleHumanNoteRevisionError
@@ -134,6 +138,14 @@ export class VaultModule {
     return this.#humanNotes.lists();
   }
 
+  humanNoteDeletionImpact(id: string) {
+    return this.#humanNotes.deletionImpact(id);
+  }
+
+  deleteHumanNote(id: string, input: DeleteHumanNoteRequest): Promise<void> {
+    return this.#humanNotes.delete(id, input);
+  }
+
   noteConnections(id: string) {
     return this.#projection.connections(id);
   }
@@ -160,12 +172,16 @@ export class VaultModule {
 
   modelSummary(): {
     states: string[];
+    standaloneCreationState: string;
+    archivedState: string;
     types: readonly TypeDefinition[];
     relationships: OrganizationModel["relationships"];
     views: readonly SavedView[];
   } {
     return {
       states: [...this.#model.states],
+      standaloneCreationState: this.#model.standaloneCreationState,
+      archivedState: this.#model.archivedState,
       types: this.#model.types,
       relationships: this.#model.relationships,
       views: this.#model.views

@@ -48,6 +48,10 @@ export class InMemoryProjection {
     this.#humanNotes.set(note.id, note);
   }
 
+  removeHumanNote(id: string): void {
+    this.#humanNotes.delete(id);
+  }
+
   replaceHumanNotes(notes: readonly ProjectedHumanNote[]): void {
     this.#humanNotes.clear();
     for (const note of notes) {
@@ -87,6 +91,7 @@ export class InMemoryProjection {
   humanNoteLists(): {
     notes: HumanNoteListItem[];
     inbox: HumanNoteListItem[];
+    archive: HumanNoteListItem[];
   } {
     const active = [...this.#humanNotes.values()].filter(
       (note) => note.state !== this.#archivedState
@@ -100,8 +105,36 @@ export class InMemoryProjection {
             { field: "state", operator: "equals", value: this.#inboxState }
           ]
         }
-      }).map(toListItem)
+      }).map(toListItem),
+      archive: [...this.#humanNotes.values()]
+        .filter((note) => note.state === this.#archivedState)
+        .map(toListItem)
     };
+  }
+
+  incomingLinkCount(id: string): number | undefined {
+    if (!this.#humanNotes.has(id)) {
+      return undefined;
+    }
+    let count = 0;
+    for (const source of this.#documents()) {
+      if (source.id === id) {
+        continue;
+      }
+      count += wikilinks(source.bodyMarkdown).filter(
+        (link) => this.#linkResolvesTo(link, id)
+      ).length;
+      if (!("relationships" in source)) {
+        continue;
+      }
+      for (const value of Object.values(source.relationships)) {
+        const entries = Array.isArray(value) ? value : [value];
+        count += entries.flatMap(wikilinks).filter(
+          (link) => this.#linkResolvesTo(link, id)
+        ).length;
+      }
+    }
+    return count;
   }
 
   queryHumanNotes(query: QuerySpec): StructuredNoteItem[] {
@@ -244,12 +277,14 @@ export class InMemoryProjection {
   }
 
   targetResolvesTo(target: string, id: string): boolean {
-    const resolved = this.#resolve({
-      target,
-      label: target,
-      sourceMarkdown: `[[${target}]]`
-    });
-    return resolved.status === "resolved" && resolved.matches[0]?.id === id;
+    return this.#linkResolvesTo(
+      {
+        target,
+        label: target,
+        sourceMarkdown: `[[${target}]]`
+      },
+      id
+    );
   }
 
   readonlyDocuments(): readonly (ProjectedHumanNote | ProjectedDailyNote)[] {
@@ -258,6 +293,17 @@ export class InMemoryProjection {
 
   #documents(): Array<ProjectedHumanNote | ProjectedDailyNote> {
     return [...this.#humanNotes.values(), ...this.#dailyNotes.values()];
+  }
+
+  #linkResolvesTo(
+    link: { target: string; label: string; sourceMarkdown: string },
+    id: string
+  ): boolean {
+    const resolved = this.#resolve(link);
+    return (
+      resolved.status === "resolved" &&
+      resolved.matches[0]?.id === id
+    );
   }
 
   #resolve(link: {

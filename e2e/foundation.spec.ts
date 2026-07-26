@@ -856,3 +856,153 @@ target_types: [note]
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+test("the packed CLI archives and deletes a linked Human Note through Chromium", async ({
+  browser
+}) => {
+  test.setTimeout(240_000);
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "fumori-lifecycle-e2e-"));
+  let server: ChildProcess | undefined;
+
+  try {
+    const fumori = await packAndInstall(temporaryRoot);
+    const vault = join(temporaryRoot, "vault");
+    await execFileAsync("git", ["init", "--quiet", vault]);
+    await execFileAsync(fumori, ["vault", "bootstrap", "--path", vault], {
+      cwd: temporaryRoot
+    });
+    const lifecyclePath = join(
+      vault,
+      ".second-brain",
+      "model",
+      "lifecycle.md"
+    );
+    await writeFile(
+      lifecyclePath,
+      (await readFile(lifecyclePath, "utf8"))
+        .replace("  - archived", "  - cold")
+        .replace("archived_state: archived", "archived_state: cold"),
+      "utf8"
+    );
+    server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
+      cwd: temporaryRoot,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let url = await waitForFumoriServer(server, {
+      label: "Packed lifecycle Fumori server",
+      timeoutMs: 20_000
+    });
+
+    const createNote = async (title: string, body: string) => {
+      const created = (await (
+        await fetch(`${url}/api/v1/notes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ context: "global" })
+        })
+      ).json()) as { id: string; revision: string };
+      return (await (
+        await fetch(`${url}/api/v1/notes/${created.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            format: "rich",
+            baseRevision: created.revision,
+            bodyMarkdown: `# ${title}\n\n${body}`
+          })
+        })
+      ).json()) as {
+        id: string;
+        canonicalPath: string;
+        revision: string;
+      };
+    };
+    const target = await createNote("Cedar", "Keep this note.");
+    const source = await createNote("Source", "Follow [[Cedar]].");
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 }
+    });
+    const page = await context.newPage();
+    await page.goto(`${url}/notes/${target.id}`);
+
+    await page.getByRole("button", { name: "Archive note" }).click();
+    await expect(page).toHaveURL(`${url}/archive`);
+    await expect(page.getByRole("link", { name: "Cedar" })).toBeVisible();
+    expect(await readFile(join(vault, target.canonicalPath), "utf8")).toContain(
+      "state: cold"
+    );
+    await page.getByRole("link", { name: "Notes", exact: true }).click();
+    await expect(page.getByRole("link", { name: "Cedar" })).toHaveCount(0);
+    await page.getByRole("link", { name: "Inbox", exact: true }).click();
+    await expect(page.getByRole("link", { name: "Cedar" })).toHaveCount(0);
+
+    await stopServer(server);
+    server = undefined;
+    server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
+      cwd: temporaryRoot,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    url = await waitForFumoriServer(server, {
+      label: "Restarted archived-note Fumori server",
+      timeoutMs: 20_000
+    });
+    await page.goto(`${url}/archive`);
+    await expect(page.getByRole("link", { name: "Cedar" })).toBeVisible();
+    await page.getByRole("link", { name: "Archive", exact: true }).click();
+    await page.getByRole("link", { name: "Cedar" }).click();
+    await expect(page).toHaveURL(`${url}/notes/${target.id}`);
+    await expect(page.getByText("Keep this note.")).toBeVisible();
+    await page.getByRole("button", { name: "Unarchive note" }).click();
+    await expect(page).toHaveURL(`${url}/notes`);
+    await expect(page.getByRole("link", { name: "Cedar" })).toBeVisible();
+    expect(await readFile(join(vault, target.canonicalPath), "utf8")).toContain(
+      "state: captured"
+    );
+    await page.getByRole("link", { name: "Cedar" }).click();
+
+    await page.getByRole("button", { name: "Delete note" }).click();
+    const confirmation = page.getByRole("dialog", { name: "Delete Cedar?" });
+    await expect(confirmation).toContainText(
+      "1 incoming link will become unresolved."
+    );
+    await confirmation.getByRole("button", { name: "Cancel" }).click();
+    await expect(readFile(join(vault, target.canonicalPath), "utf8")).resolves
+      .toContain("Keep this note.");
+    await page.getByRole("button", { name: "Delete note" }).click();
+    await confirmation.getByRole("button", { name: "Delete permanently" }).click();
+    await expect(page).toHaveURL(`${url}/notes`);
+    await expect(readFile(join(vault, target.canonicalPath), "utf8")).rejects
+      .toMatchObject({ code: "ENOENT" });
+
+    await page.goto(`${url}/notes/${source.id}`);
+    await page.getByRole("button", { name: "Inspector" }).click();
+    const inspector = page.getByRole("form", { name: "Document inspector" });
+    await expect(inspector.getByRole("button", { name: /Cedar unresolved/ }))
+      .toBeVisible();
+
+    await stopServer(server);
+    server = undefined;
+    server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
+      cwd: temporaryRoot,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    url = await waitForFumoriServer(server, {
+      label: "Restarted lifecycle Fumori server",
+      timeoutMs: 20_000
+    });
+    await page.goto(`${url}/notes/${source.id}`);
+    await page.getByRole("button", { name: "Inspector" }).click();
+    await expect(
+      page
+        .getByRole("form", { name: "Document inspector" })
+        .getByRole("button", { name: /Cedar unresolved/ })
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Archive note" })).toBeVisible();
+    await context.close();
+  } finally {
+    if (server) {
+      await stopServer(server);
+    }
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});

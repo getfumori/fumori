@@ -98,6 +98,20 @@ export const humanNoteListItemSchema = humanNoteResponseSchema
 
 export const humanNoteListResponseSchema = z.array(humanNoteListItemSchema);
 
+export const humanNoteDeletionImpactResponseSchema = z.object({
+  id: z.uuid(),
+  revision: revisionSchema,
+  incomingLinkCount: z.number().int().nonnegative()
+});
+
+export const deleteHumanNoteRequestSchema = z.object({
+  baseRevision: revisionSchema,
+  confirmedIncomingLinkCount: z.number().int().nonnegative()
+});
+
 export type HumanNoteResponse = z.infer<typeof humanNoteResponseSchema>;
 export type HumanNoteListItem = z.infer<typeof humanNoteListItemSchema>;
 export type SaveHumanNoteRequest = z.infer<typeof saveHumanNoteRequestSchema>;
+export type DeleteHumanNoteRequest = z.infer<
+  typeof deleteHumanNoteRequestSchema
+>;

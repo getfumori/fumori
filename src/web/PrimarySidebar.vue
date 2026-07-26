@@ -88,8 +88,10 @@ function navigate(event: MouseEvent, destination: string): void {
       </a>
       <a
         class="nav-item"
-        href="#archive"
-        @click="navigate($event, '#archive')"
+        :class="{ active: active === 'archive' }"
+        href="/archive"
+        :aria-current="active === 'archive' ? 'page' : undefined"
+        @click="navigate($event, '/archive')"
       >
         <span class="nav-glyph archive-glyph" aria-hidden="true"></span>
         Archive
