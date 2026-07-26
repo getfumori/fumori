@@ -2,31 +2,43 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   access,
+  lstat,
   mkdir,
   readFile,
+  realpath,
   rename,
   rm,
   writeFile
 } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
+import { z } from "zod";
+
+import type { CheckpointResponse } from "../contracts/checkpoint.js";
 import { atomicReplace } from "./atomic-publication.js";
 
 const execFileAsync = promisify(execFile);
 
 function gitOptions() {
+  const environment = Object.fromEntries(
+    ["PATH", "LANG", "LC_ALL", "TMPDIR"].flatMap((key) => {
+      const value = process.env[key];
+      return value === undefined ? [] : [[key, value]];
+    })
+  );
   return {
     env: {
-      ...process.env,
+      ...environment,
       GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_CONFIG_NOSYSTEM: "1",
+      GIT_OPTIONAL_LOCKS: "0",
       GIT_TERMINAL_PROMPT: "0"
     }
   };
 }
 
-async function hardenedGit(vaultPath: string, arguments_: string[]) {
+export async function hardenedGit(vaultPath: string, arguments_: string[]) {
   const filterConfiguration = await execFileAsync(
     "git",
     [
@@ -37,7 +49,7 @@ async function hardenedGit(vaultPath: string, arguments_: string[]) {
       "-c",
       "core.fsmonitor=false",
       "config",
-      "--local",
+      "--includes",
       "--name-only",
       "--get-regexp",
       "^filter\\..*\\.(clean|smudge|process|required)$"
@@ -112,6 +124,29 @@ type Journal = {
   >;
 };
 
+const transactionFileSchema = z.object({
+  sourcePath: z.string().min(1),
+  destinationPath: z.string().min(1),
+  beforeSource: z.string(),
+  source: z.string(),
+  temporaryPath: z.string().min(1),
+  backupPath: z.string().min(1)
+});
+
+const journalSchema = z.object({
+  beforeHead: z.string().regex(/^[0-9a-f]{40}$/),
+  stagingDirectory: z.string().min(1),
+  files: z.array(transactionFileSchema).min(1)
+});
+
+const CANONICAL_ROOTS = [
+  ".second-brain",
+  "assets",
+  "human",
+  "knowledge",
+  "sources"
+] as const;
+
 async function exists(path: string): Promise<boolean> {
   return access(path).then(
     () => true,
@@ -173,6 +208,22 @@ export class RepositoryCoordinator {
     }
   }
 
+  async checkpoint(message = "Checkpoint Vault"): Promise<CheckpointResponse> {
+    return this.runWrite(async () => {
+      await this.#stage();
+      const changedFileCount = await this.#stagedChangedFileCount();
+      if (changedFileCount === 0) {
+        return { created: false, sha: null, changedFileCount: 0 };
+      }
+      await this.#commitStaged(message);
+      return {
+        created: true,
+        sha: await this.#head(),
+        changedFileCount
+      };
+    });
+  }
+
   async publishDeletion(
     path: string,
     beforeSource: string,
@@ -217,6 +268,7 @@ export class RepositoryCoordinator {
         backupPath: join(stagingDirectory, `${index}.before`)
       }))
     };
+    await this.#validateJournalPaths(journal);
     try {
       await atomicReplace(this.#journalPath, JSON.stringify(journal));
       await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
@@ -276,13 +328,30 @@ export class RepositoryCoordinator {
   }
 
   async #recover(): Promise<void> {
-    const source = await readFile(this.#journalPath, "utf8").catch(
-      () => undefined
-    );
-    if (!source) {
+    const journalEntry = await lstat(this.#journalPath).catch(() => undefined);
+    if (journalEntry && !journalEntry.isFile()) {
+      throw new Error(
+        `Vault transaction journal has an unsafe file type: ${this.#journalPath}`
+      );
+    }
+    if (!journalEntry) {
       return;
     }
-    const journal = JSON.parse(source) as Journal;
+    const source = await readFile(this.#journalPath, "utf8");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(source);
+    } catch {
+      throw new Error("Vault transaction journal is not valid JSON");
+    }
+    const result = journalSchema.safeParse(parsed);
+    if (!result.success) {
+      throw new Error(
+        `Vault transaction journal is invalid: ${result.error.issues[0]?.message ?? "unknown error"}`
+      );
+    }
+    const journal = result.data;
+    await this.#validateJournalPaths(journal);
     if ((await this.#head()) === journal.beforeHead) {
       await this.#restoreBefore(journal);
     } else {
@@ -312,12 +381,123 @@ export class RepositoryCoordinator {
     return (await this.#git(["rev-parse", "HEAD"])).stdout.trim();
   }
 
-  async #commit(message: string, paths?: readonly string[]): Promise<void> {
+  async #validateJournalPaths(journal: Journal): Promise<void> {
+    const transactionRoot = join(
+      dirname(this.#journalPath),
+      "fumori-transactions"
+    );
+    const expectedParent = relative(
+      transactionRoot,
+      dirname(journal.stagingDirectory)
+    );
+    if (
+      expectedParent !== "" ||
+      !z.uuid().safeParse(basename(journal.stagingDirectory)).success
+    ) {
+      throw new Error(
+        `Vault transaction journal has an unsafe staging directory: ${journal.stagingDirectory}`
+      );
+    }
+    for (const path of [transactionRoot, journal.stagingDirectory]) {
+      const entry = await lstat(path).catch(() => undefined);
+      if (entry?.isSymbolicLink() || (entry && !entry.isDirectory())) {
+        throw new Error(
+          `Vault transaction journal references an unsafe staging path: ${path}`
+        );
+      }
+      if (entry) {
+        const resolved = await realpath(path);
+        const resolvedRelativePath = relative(transactionRoot, resolved);
+        if (
+          resolvedRelativePath.startsWith("..") ||
+          isAbsolute(resolvedRelativePath)
+        ) {
+          throw new Error(
+            `Vault transaction journal escapes its staging root: ${path}`
+          );
+        }
+      }
+    }
+    for (const [index, file] of journal.files.entries()) {
+      for (const [label, path] of [
+        ["source", file.sourcePath],
+        ["destination", file.destinationPath]
+      ] as const) {
+        const canonicalPath = relative(this.#vaultPath, path);
+        if (
+          canonicalPath.startsWith("..") ||
+          isAbsolute(canonicalPath) ||
+          !CANONICAL_ROOTS.some((root) =>
+            canonicalPath.startsWith(`${root}/`)
+          )
+        ) {
+          throw new Error(
+            `Vault transaction journal has an unsafe ${label} path: ${path}`
+          );
+        }
+      }
+      if (
+        file.temporaryPath !==
+          join(journal.stagingDirectory, `${index}.new`) ||
+        file.backupPath !== join(journal.stagingDirectory, `${index}.before`)
+      ) {
+        throw new Error(
+          `Vault transaction journal has unsafe staged file paths at index ${index}`
+        );
+      }
+      for (const path of [file.temporaryPath, file.backupPath]) {
+        const entry = await lstat(path).catch(() => undefined);
+        if (entry?.isSymbolicLink() || (entry && !entry.isFile())) {
+          throw new Error(
+            `Vault transaction journal references an unsafe staged file: ${path}`
+          );
+        }
+      }
+    }
+  }
+
+  async #stagedChangedFileCount(): Promise<number> {
+    const output = (
+      await this.#git([
+        "diff",
+        "--cached",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        "HEAD"
+      ])
+    ).stdout;
+    const records = output.split("\0");
+    let count = 0;
+    for (let index = 0; index < records.length; ) {
+      const status = records[index++];
+      if (!status) {
+        continue;
+      }
+      count += 1;
+      index += status.startsWith("R") || status.startsWith("C") ? 2 : 1;
+    }
+    return count;
+  }
+
+  async #stage(paths?: readonly string[]): Promise<void> {
     await this.#git([
       "add",
       "--all",
-      ...(paths ? ["--", ...new Set(paths)] : [])
+      "--force",
+      "--",
+      ...(paths ? [...new Set(paths)] : [...CANONICAL_ROOTS])
     ]);
+    if (!paths) {
+      await this.#git(["add", "--all"]);
+    }
+  }
+
+  async #commit(
+    message: string,
+    paths?: readonly string[]
+  ): Promise<boolean> {
+    await this.#stage(paths);
     const staged = await this.#git([
       "diff",
       "--cached",
@@ -337,8 +517,13 @@ export class RepositoryCoordinator {
       }
     );
     if (!staged) {
-      return;
+      return false;
     }
+    await this.#commitStaged(message);
+    return true;
+  }
+
+  async #commitStaged(message: string): Promise<void> {
     await this.#git([
       "-c",
       "user.name=Fumori",

@@ -1,35 +1,84 @@
-import { execFile } from "node:child_process";
-import { readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { promisify } from "node:util";
 
+import { parseDocument } from "yaml";
 import { z } from "zod";
 
-const execFileAsync = promisify(execFile);
+import { hardenedGit } from "./repository-coordinator.js";
+import { validateVaultWorktree } from "./validate-worktree.js";
 
 const manifestSchema = z.object({
-  id: z.uuid(),
+  _id: z.uuid(),
+  _schema: z.literal("fumori.vault"),
+  _version: z.literal(1),
+  _created: z.iso.datetime({ offset: true }),
   name: z.string().min(1)
 });
 
-export type OpenVault = z.infer<typeof manifestSchema> & {
+export type OpenVault = {
+  id: string;
+  name: string;
   path: string;
 };
 
-function manifestValue(source: string, key: string): string | undefined {
-  const match = source.match(new RegExp(`^${key}: (.+)$`, "m"));
-  return match?.[1];
-}
-
-function parseName(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
+async function validateGitIndex(path: string): Promise<void> {
+  const gitDirectory = (
+    await hardenedGit(path, ["rev-parse", "--absolute-git-dir"])
+  ).stdout.trim();
+  const expectedGitDirectory = await realpath(join(path, ".git"));
+  if ((await realpath(gitDirectory)) !== expectedGitDirectory) {
+    throw new Error(
+      `Vault Git metadata escapes the Vault root: ${gitDirectory}`
+    );
   }
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return typeof parsed === "string" ? parsed : undefined;
-  } catch {
-    return value;
+  const stagedEntries = (
+    await hardenedGit(path, ["ls-files", "--stage", "-z"])
+  ).stdout.split("\0");
+  for (const entry of stagedEntries) {
+    if (!entry) {
+      continue;
+    }
+    const separator = entry.indexOf("\t");
+    const [mode, _objectId, stage] = entry
+      .slice(0, separator)
+      .split(" ");
+    const canonicalPath = entry.slice(separator + 1);
+    if (mode === "160000") {
+      throw new Error(
+        `Vault contains an unsafe Git submodule path: ${canonicalPath}`
+      );
+    }
+    if (stage !== "0") {
+      throw new Error(
+        `Vault Git index has an unmerged canonical path: ${canonicalPath}`
+      );
+    }
+  }
+  const flaggedEntries = (
+    await hardenedGit(path, ["ls-files", "-v", "-z"])
+  ).stdout.split("\0");
+  for (const entry of flaggedEntries) {
+    if (/^[a-zS] /.test(entry)) {
+      throw new Error(
+        `Vault Git index hides a canonical path from complete scanning: ${entry.slice(2)}`
+      );
+    }
+  }
+  for (const operationPath of [
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+    "rebase-merge",
+    "rebase-apply",
+    "sequencer",
+    "index.lock"
+  ]) {
+    if (await lstat(join(gitDirectory, operationPath)).catch(() => undefined)) {
+      throw new Error(
+        `Vault Git repository has an in-progress operation: ${operationPath}`
+      );
+    }
   }
 }
 
@@ -37,9 +86,8 @@ export async function openVault(inputPath: string): Promise<OpenVault> {
   const path = await realpath(resolve(inputPath)).catch(() => {
     throw new Error(`Vault path does not exist: ${inputPath}`);
   });
-  const { stdout: topLevelOutput } = await execFileAsync("git", [
-    "-C",
-    path,
+  await validateVaultWorktree(path);
+  const { stdout: topLevelOutput } = await hardenedGit(path, [
     "rev-parse",
     "--show-toplevel"
   ]).catch(() => {
@@ -49,26 +97,42 @@ export async function openVault(inputPath: string): Promise<OpenVault> {
   if (topLevel !== path) {
     throw new Error(`Vault path must be the repository root: ${path}`);
   }
+  await validateGitIndex(path);
 
   const source = await readFile(join(path, ".second-brain/vault.md"), "utf8").catch(
     () => {
       throw new Error(`Vault Manifest is missing: ${path}`);
     }
   );
-  if (
-    manifestValue(source, "_schema") !== "fumori.vault" ||
-    manifestValue(source, "_version") !== "1"
-  ) {
-    throw new Error(`Vault Manifest is incompatible: ${path}`);
+  const frontmatterEnd = source.indexOf("\n---\n", "---\n".length);
+  if (!source.startsWith("---\n") || frontmatterEnd < 0) {
+    throw new Error(
+      `Vault Manifest has invalid frontmatter: .second-brain/vault.md`
+    );
   }
-
-  const manifest = manifestSchema.safeParse({
-    id: manifestValue(source, "_id"),
-    name: parseName(manifestValue(source, "name"))
-  });
+  const document = parseDocument(
+    source.slice("---\n".length, frontmatterEnd),
+    { uniqueKeys: true }
+  );
+  if (document.errors.length > 0) {
+    throw new Error(
+      `Vault Manifest has invalid frontmatter: .second-brain/vault.md: ${document.errors[0]!.message}`
+    );
+  }
+  const manifest = manifestSchema.safeParse(document.toJS());
   if (!manifest.success) {
-    throw new Error(`Vault Manifest is invalid: ${path}`);
+    const diagnostic = manifest.error.issues[0];
+    throw new Error(
+      `Vault Manifest is invalid at .second-brain/vault.md${
+        diagnostic
+          ? ` (${diagnostic.path.join(".") || "frontmatter"}): ${diagnostic.message}`
+          : ""
+      }`
+    );
   }
-
-  return { ...manifest.data, path };
+  return {
+    id: manifest.data._id,
+    name: manifest.data.name,
+    path
+  };
 }

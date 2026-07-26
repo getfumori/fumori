@@ -23,6 +23,14 @@ const lifecycleSchema = z.object({
   archived_state: z.string().min(1)
 });
 
+const corePropertiesSchema = z.object({
+  _schema: z.literal("fumori.model.core-properties"),
+  _version: z.literal(1),
+  properties: z
+    .array(z.enum(["type", "state", "tags", "aliases"]))
+    .length(4)
+});
+
 const noteTypeSchema = z.object({
   _schema: z.literal("fumori.model.type"),
   _version: z.literal(1),
@@ -115,6 +123,25 @@ function frontmatter(source: string, path: string): unknown {
   return document.toJS();
 }
 
+function modelDefinition<T>(
+  schema: z.ZodType<T>,
+  value: unknown,
+  path: string
+): T {
+  const result = schema.safeParse(value);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    throw new Error(
+      `Organization Model definition is invalid: ${path}${
+        issue
+          ? ` (${issue.path.join(".") || "frontmatter"}): ${issue.message}`
+          : ""
+      }`
+    );
+  }
+  return result.data;
+}
+
 async function modelDocuments(
   vaultPath: string,
   directory: "types" | "views" | "relationships"
@@ -202,10 +229,12 @@ export async function loadOrganizationModel(
   vaultPath: string
 ): Promise<OrganizationModel> {
   const lifecyclePath = ".second-brain/model/lifecycle.md";
+  const corePropertiesPath = ".second-brain/model/core-properties.md";
   const noteTypePath = ".second-brain/model/types/note.md";
   const inboxPath = ".second-brain/model/views/inbox.md";
   const [
     lifecycleSource,
+    corePropertiesSource,
     noteTypeSource,
     inboxSource,
     typeDocuments,
@@ -213,19 +242,43 @@ export async function loadOrganizationModel(
     relationshipDocuments
   ] = await Promise.all([
     readFile(join(vaultPath, lifecyclePath), "utf8"),
+    readFile(join(vaultPath, corePropertiesPath), "utf8"),
     readFile(join(vaultPath, noteTypePath), "utf8"),
     readFile(join(vaultPath, inboxPath), "utf8"),
     modelDocuments(vaultPath, "types"),
     modelDocuments(vaultPath, "views"),
     modelDocuments(vaultPath, "relationships")
   ]);
-  const lifecycle = lifecycleSchema.parse(
-    frontmatter(lifecycleSource, lifecyclePath)
+  const lifecycle = modelDefinition(
+    lifecycleSchema,
+    frontmatter(lifecycleSource, lifecyclePath),
+    lifecyclePath
   );
-  const noteType = noteTypeSchema.parse(
-    frontmatter(noteTypeSource, noteTypePath)
+  const coreProperties = modelDefinition(
+    corePropertiesSchema,
+    frontmatter(corePropertiesSource, corePropertiesPath),
+    corePropertiesPath
   );
-  const inbox = inboxViewSchema.parse(frontmatter(inboxSource, inboxPath));
+  if (new Set(coreProperties.properties).size !== 4) {
+    throw new Error(
+      `Organization Model definition is invalid: ${corePropertiesPath} (properties): core properties must be unique`
+    );
+  }
+  const noteType = modelDefinition(
+    noteTypeSchema,
+    frontmatter(noteTypeSource, noteTypePath),
+    noteTypePath
+  );
+  const inbox = modelDefinition(
+    inboxViewSchema,
+    frontmatter(inboxSource, inboxPath),
+    inboxPath
+  );
+  if (new Set(lifecycle.states).size !== lifecycle.states.length) {
+    throw new Error(
+      `Organization Model definition is invalid: ${lifecyclePath} (states): lifecycle states must be unique`
+    );
+  }
   const states = new Set(lifecycle.states);
   for (const [source, state] of [
     [noteTypePath, noteType.default_state],
@@ -237,13 +290,18 @@ export async function loadOrganizationModel(
     }
   }
   const types = typeDocuments.map(({ path, value }) =>
-    publicType(typeFileSchema.parse(value), path)
+    publicType(modelDefinition(typeFileSchema, value, path), path)
   );
   const customViews = viewDocuments
     .filter(({ path }) => path !== inboxPath)
-    .map(({ path, value }) => publicView(viewFileSchema.parse(value), path));
+    .map(({ path, value }) =>
+      publicView(modelDefinition(viewFileSchema, value, path), path)
+    );
   const relationships = relationshipDocuments.map(({ path, value }) =>
-    publicRelationship(relationshipFileSchema.parse(value), path)
+    publicRelationship(
+      modelDefinition(relationshipFileSchema, value, path),
+      path
+    )
   );
   for (const type of types) {
     if (type.defaultState && !states.has(type.defaultState)) {

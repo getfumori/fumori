@@ -53,10 +53,17 @@ export class InMemoryProjection {
   }
 
   replaceHumanNotes(notes: readonly ProjectedHumanNote[]): void {
-    this.#humanNotes.clear();
+    const next = new Map<string, ProjectedHumanNote>();
     for (const note of notes) {
-      this.#humanNotes.set(note.id, note);
+      const duplicate = next.get(note.id);
+      if (duplicate) {
+        throw new Error(
+          `Duplicate object ID '${note.id}' in ${duplicate.canonicalPath} and ${note.canonicalPath}`
+        );
+      }
+      next.set(note.id, note);
     }
+    this.#humanNotes = next;
   }
 
   prepareAllNotes(
@@ -289,6 +296,19 @@ export class InMemoryProjection {
 
   readonlyDocuments(): readonly (ProjectedHumanNote | ProjectedDailyNote)[] {
     return this.#documents();
+  }
+
+  assertUniqueObjectIds(): void {
+    const pathsById = new Map<string, string>();
+    for (const note of this.#documents()) {
+      const priorPath = pathsById.get(note.id);
+      if (priorPath) {
+        throw new Error(
+          `Duplicate object ID '${note.id}' in ${priorPath} and ${note.canonicalPath}`
+        );
+      }
+      pathsById.set(note.id, note.canonicalPath);
+    }
   }
 
   #documents(): Array<ProjectedHumanNote | ProjectedDailyNote> {

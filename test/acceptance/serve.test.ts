@@ -119,6 +119,9 @@ describe("fumori serve", () => {
       autosave: {
         debounceMs: 1_500,
         maxDirtyMs: 10_000
+      },
+      checkpoint: {
+        intervalMs: 30 * 60 * 1_000
       }
     });
   });
@@ -137,6 +140,9 @@ describe("fumori serve", () => {
       autosave: {
         debounceMs: 250,
         maxDirtyMs: 2_000
+      },
+      checkpoint: {
+        intervalMs: 30 * 60 * 1_000
       }
     });
   });

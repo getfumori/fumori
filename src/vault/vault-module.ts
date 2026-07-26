@@ -1,4 +1,5 @@
 import type { SaveDailyNoteRequest } from "../contracts/daily-note.js";
+import type { CheckpointResponse } from "../contracts/checkpoint.js";
 import type {
   DeleteHumanNoteRequest,
   SaveHumanNoteRequest
@@ -48,6 +49,7 @@ export class VaultModule {
   readonly #humanNotes: HumanNotes;
   readonly #projection: InMemoryProjection;
   readonly #model: OrganizationModel;
+  readonly #coordinator: RepositoryCoordinator;
 
   private constructor(options: {
     identity: VaultIdentity;
@@ -55,12 +57,14 @@ export class VaultModule {
     humanNotes: HumanNotes;
     projection: InMemoryProjection;
     model: OrganizationModel;
+    coordinator: RepositoryCoordinator;
   }) {
     this.identity = options.identity;
     this.#dailyNotes = options.dailyNotes;
     this.#humanNotes = options.humanNotes;
     this.#projection = options.projection;
     this.#model = options.model;
+    this.#coordinator = options.coordinator;
   }
 
   static async open(
@@ -93,13 +97,20 @@ export class VaultModule {
       (overrides) => dailyNotes.projectionSnapshots(overrides)
     );
     await humanNotes.rebuildProjection();
+    projection.assertUniqueObjectIds();
+    await coordinator.checkpoint("Recovery checkpoint");
     return new VaultModule({
       identity: { id: vault.id, name: vault.name },
       dailyNotes,
       humanNotes,
       projection,
-      model
+      model,
+      coordinator
     });
+  }
+
+  checkpoint(): Promise<CheckpointResponse> {
+    return this.#coordinator.checkpoint();
   }
 
   readDailyNote(date: string): Promise<DailyNoteSnapshot> {

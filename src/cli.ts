@@ -12,6 +12,7 @@ const HELP = `Usage:
   fumori serve --vault <repository> [--host <host>] [--port <port>]
     [--autosave-debounce-ms <milliseconds>]
     [--autosave-max-dirty-ms <milliseconds>]
+    [--checkpoint-interval-ms <milliseconds>]
 `;
 
 const bootstrapSchema = z.object({
@@ -23,7 +24,12 @@ const serveSchema = z.object({
   host: z.string().min(1).default("127.0.0.1"),
   port: z.coerce.number().int().min(0).max(65_535).default(3000),
   autosaveDebounceMs: z.coerce.number().int().positive().default(1_500),
-  autosaveMaxDirtyMs: z.coerce.number().int().positive().default(10_000)
+  autosaveMaxDirtyMs: z.coerce.number().int().positive().default(10_000),
+  checkpointIntervalMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(30 * 60 * 1_000)
 });
 
 function bootstrapArguments(arguments_: string[]) {
@@ -46,7 +52,8 @@ function serveArguments(arguments_: string[]) {
       host: { type: "string" },
       port: { type: "string" },
       "autosave-debounce-ms": { type: "string" },
-      "autosave-max-dirty-ms": { type: "string" }
+      "autosave-max-dirty-ms": { type: "string" },
+      "checkpoint-interval-ms": { type: "string" }
     },
     allowPositionals: false,
     strict: true
@@ -56,7 +63,8 @@ function serveArguments(arguments_: string[]) {
     host: parsed.values.host,
     port: parsed.values.port,
     autosaveDebounceMs: parsed.values["autosave-debounce-ms"],
-    autosaveMaxDirtyMs: parsed.values["autosave-max-dirty-ms"]
+    autosaveMaxDirtyMs: parsed.values["autosave-max-dirty-ms"],
+    checkpointIntervalMs: parsed.values["checkpoint-interval-ms"]
   });
 }
 

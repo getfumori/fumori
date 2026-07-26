@@ -7,6 +7,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono, type Context } from "hono";
 
 import { appConfigSchema } from "../contracts/app-config.js";
+import { checkpointResponseSchema } from "../contracts/checkpoint.js";
 import {
   noteConnectionsResponseSchema,
   renameToTitleRequestSchema,
@@ -56,6 +57,7 @@ type ServerOptions = {
   port: number;
   autosaveDebounceMs: number;
   autosaveMaxDirtyMs: number;
+  checkpointIntervalMs: number;
 };
 
 type ListeningInfo = {
@@ -102,9 +104,17 @@ export async function startServer(
         autosave: {
           debounceMs: options.autosaveDebounceMs,
           maxDirtyMs: options.autosaveMaxDirtyMs
+        },
+        checkpoint: {
+          intervalMs: options.checkpointIntervalMs
         }
       })
     );
+  });
+  app.post("/api/v1/checkpoint", async (context) => {
+    const result = await vault.checkpoint();
+    context.header("Cache-Control", "no-store");
+    return context.json(checkpointResponseSchema.parse(result));
   });
   app.get("/api/v1/today", async (context) => {
     context.header("Cache-Control", "no-store");
@@ -438,7 +448,7 @@ export async function startServer(
     );
   }
 
-  return serve(
+  const server = serve(
     {
       fetch: app.fetch,
       hostname: options.host,
@@ -449,4 +459,22 @@ export async function startServer(
       onListening?.({ url: `http://${address}:${info.port}` });
     }
   );
+  let scheduledCheckpointRunning = false;
+  const checkpointTimer = setInterval(() => {
+    if (scheduledCheckpointRunning) {
+      return;
+    }
+    scheduledCheckpointRunning = true;
+    void vault
+      .checkpoint()
+      .catch(() => {
+        process.stderr.write("Fumori scheduled checkpoint failed.\n");
+      })
+      .finally(() => {
+        scheduledCheckpointRunning = false;
+      });
+  }, options.checkpointIntervalMs);
+  checkpointTimer.unref();
+  server.once("close", () => clearInterval(checkpointTimer));
+  return server;
 }
