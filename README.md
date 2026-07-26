@@ -7,15 +7,38 @@ The product is designed around durable Markdown notes, explicit links and
 relationships, isolated Vaults, and AI that can read and map authorized
 knowledge without silently rewriting Human Notes.
 
-## Repository status
+## Foundation tracer
 
-This repository currently contains the implementation-project bootstrap and
-the accepted architecture and Foundation release boundaries. Product code has
-not started.
+The first runnable tracer bootstraps an operator-created empty Git repository
+as a Blank Vault and serves its virtual Today surface from the packaged CLI:
 
-The implementation-planning interview is complete. The next planning step may
-turn the accepted Foundation boundary into an implementation spec; no spec or
-implementation backlog has been created yet.
+```sh
+git init ~/fumori-vault
+npx fumori vault bootstrap --path ~/fumori-vault
+npx fumori serve --vault ~/fumori-vault
+```
+
+The server binds to `127.0.0.1:3000` by default. Passing `--host` explicitly can
+expose it elsewhere, but this Foundation tracer provides neither
+authentication nor TLS.
+
+Bootstrap creates the canonical Vault Manifest, neutral Core Model, reserved
+ownership zones, and one initial Git commit. Opening a missing Today surface is
+read-only: it does not create a Daily Note or dirty the repository.
+
+## Development
+
+Fumori requires Node.js 24 LTS, pnpm, and the system Git CLI:
+
+```sh
+corepack pnpm install
+corepack pnpm run typecheck
+corepack pnpm test
+```
+
+The end-to-end test packs the npm artifact, installs it outside this checkout,
+uses its real CLI against a temporary Git repository, starts its real server,
+and opens Chromium at the accepted desktop viewports.
 
 ## Project documents
 
