@@ -4,7 +4,8 @@ import {
   open,
   readFile,
   readdir,
-  rename
+  rename,
+  rm
 } from "node:fs/promises";
 import { basename, join } from "node:path";
 
@@ -14,14 +15,18 @@ import { z } from "zod";
 import type { SaveHumanNoteRequest } from "../contracts/human-note.js";
 import {
   organizationModelValueMatches,
-  type OrganizationModelValue
+  type OrganizationModelValue,
+  type RelationshipDefinition
 } from "../contracts/organization-model.js";
+import type { DailyNoteSnapshot } from "./daily-notes.js";
 import {
   InMemoryProjection,
   type ProjectedHumanNote
 } from "./in-memory-projection.js";
 import { atomicReplace } from "./atomic-publication.js";
 import type { OrganizationModel } from "./organization-model.js";
+import { rewriteWikilinks } from "./wikilinks.js";
+import type { RepositoryCoordinator } from "./repository-coordinator.js";
 
 type HumanNoteMetadata = {
   id: string;
@@ -31,6 +36,7 @@ type HumanNoteMetadata = {
   tags?: string[];
   aliases?: string[];
   properties?: Record<string, OrganizationModelValue>;
+  relationships?: Record<string, string | string[]>;
   frontmatter?: string;
 };
 
@@ -107,6 +113,30 @@ function stringList(
     );
   }
   return value;
+}
+
+function relationshipValue(
+  value: unknown,
+  definition: RelationshipDefinition,
+  canonicalPath: string
+): string | string[] {
+  const validWikilink = (entry: unknown) =>
+    typeof entry === "string" && /^\[\[[^\]\n]+\]\]$/.test(entry);
+  if (definition.cardinality === "one" && validWikilink(value)) {
+    return value as string;
+  }
+  if (
+    definition.cardinality === "many" &&
+    Array.isArray(value) &&
+    value.every(validWikilink)
+  ) {
+    return value as string[];
+  }
+  throw new InvalidHumanNoteMarkdownError(
+    `Relationship '${definition.key}' must contain ${
+      definition.cardinality === "one" ? "one wikilink" : "a list of wikilinks"
+    }: ${canonicalPath}`
+  );
 }
 
 function titleFromBody(bodyMarkdown: string): string {
@@ -215,6 +245,17 @@ function decodeHumanNote(
       properties[property.key] = propertyValue as OrganizationModelValue;
     }
   }
+  const relationships: Record<string, string | string[]> = {};
+  for (const relationship of model.relationships) {
+    const relationshipSource = value[relationship.key];
+    if (relationshipSource !== undefined) {
+      relationships[relationship.key] = relationshipValue(
+        relationshipSource,
+        relationship,
+        canonicalPath
+      );
+    }
+  }
   return {
     id,
     created,
@@ -223,6 +264,7 @@ function decodeHumanNote(
     tags,
     aliases,
     properties,
+    relationships,
     title: titleFromBody(bodyMarkdown),
     canonicalPath,
     revision: workingRevision(source),
@@ -238,6 +280,9 @@ function encodeHumanNote(
   const propertySource = Object.entries(metadata.properties ?? {})
     .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
     .join("\n");
+  const relationshipSource = Object.entries(metadata.relationships ?? {})
+    .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
+    .join("\n");
   const frontmatter = metadata.frontmatter ?? `---
 _id: ${metadata.id}
 _schema: fumori.note
@@ -247,43 +292,74 @@ type: ${metadata.type ?? "null"}
 state: ${metadata.state}
 tags: ${JSON.stringify(metadata.tags ?? [])}
 aliases: ${JSON.stringify(metadata.aliases ?? [])}
-${propertySource ? `${propertySource}\n` : ""}---`;
+${propertySource ? `${propertySource}\n` : ""}${relationshipSource ? `${relationshipSource}\n` : ""}---`;
   return bodyMarkdown.length > 0
     ? `${frontmatter}\n\n${bodyMarkdown}\n`
     : `${frontmatter}\n`;
 }
 
 export class HumanNotes {
+  readonly #vaultPath: string;
   readonly #directory: string;
   readonly #projection: InMemoryProjection;
   readonly #model: OrganizationModel;
-  #writeTail = Promise.resolve();
+  readonly #dailyProjectionSnapshots: (
+    overrides: ReadonlyMap<string, string>
+  ) => Promise<readonly DailyNoteSnapshot[]>;
+  readonly #coordinator: RepositoryCoordinator;
 
   constructor(
     vaultPath: string,
     projection: InMemoryProjection,
-    model: OrganizationModel
+    model: OrganizationModel,
+    coordinator: RepositoryCoordinator,
+    dailyProjectionSnapshots: (
+      overrides: ReadonlyMap<string, string>
+    ) => Promise<readonly DailyNoteSnapshot[]>
   ) {
+    this.#vaultPath = vaultPath;
     this.#directory = join(vaultPath, "human", "notes");
     this.#projection = projection;
     this.#model = model;
+    this.#coordinator = coordinator;
+    this.#dailyProjectionSnapshots = dailyProjectionSnapshots;
   }
 
   async rebuildProjection(): Promise<void> {
+    this.#projection.replaceHumanNotes(await this.#projectionNotes());
+  }
+
+  async #projectionNotes(
+    overrides: ReadonlyMap<
+      string,
+      { destinationPath: string; source: string }
+    > = new Map()
+  ): Promise<ProjectedHumanNote[]> {
     const entries = await readdir(this.#directory);
+    const notes: ProjectedHumanNote[] = [];
     for (const filename of entries) {
       if (!filename.endsWith(".md")) {
         continue;
       }
-      const canonicalPath = `human/notes/${filename}`;
-      const source = await readFile(join(this.#directory, filename), "utf8");
-      this.#projection.publishHumanNote(
-        decodeHumanNote(source, canonicalPath, this.#model)
-      );
+      const path = join(this.#directory, filename);
+      const override = overrides.get(path);
+      const canonicalPath = override
+        ? `human/notes/${basename(override.destinationPath)}`
+        : `human/notes/${filename}`;
+      const source = override?.source ?? (await readFile(path, "utf8"));
+      notes.push(decodeHumanNote(source, canonicalPath, this.#model));
     }
+    return notes;
   }
 
-  async create(typeKey = "note"): Promise<ProjectedHumanNote> {
+  async create(typeKey = "note", title?: string): Promise<ProjectedHumanNote> {
+    return this.#withWriteLock(() => this.#createUnlocked(typeKey, title));
+  }
+
+  async #createUnlocked(
+    typeKey: string,
+    title: string | undefined
+  ): Promise<ProjectedHumanNote> {
     const type = this.#model.type(typeKey);
     if (!type) {
       throw new InvalidHumanNoteMarkdownError(
@@ -291,8 +367,8 @@ export class HumanNotes {
       );
     }
     const id = randomUUID();
-    const filename = `note-${id}.md`;
-    const canonicalPath = `human/notes/${filename}`;
+    const canonicalPath = `human/notes/note-${id}.md`;
+    const filename = basename(canonicalPath);
     const source = encodeHumanNote(
       {
         id,
@@ -305,7 +381,7 @@ export class HumanNotes {
             .map((property) => [property.key, property.default!])
         )
       },
-      ""
+      title ? `# ${title}` : ""
     );
     const path = join(this.#directory, filename);
     const handle = await open(path, "wx", 0o600);
@@ -316,11 +392,57 @@ export class HumanNotes {
       await handle.close();
     }
     const note = decodeHumanNote(source, canonicalPath, this.#model);
-    this.#projection.publishHumanNote(note);
-    return note;
+    if (!title) {
+      this.#projection.publishHumanNote(note);
+      return note;
+    }
+    const titledCanonicalPath = await this.#availableCanonicalPath(
+      readableSlug(title)
+    );
+    const titledPath = join(this.#directory, basename(titledCanonicalPath));
+    try {
+      await rename(path, titledPath);
+    } catch (error) {
+      await rm(path, { force: true });
+      throw error;
+    }
+    const titled = decodeHumanNote(source, titledCanonicalPath, this.#model);
+    this.#projection.publishHumanNote(titled);
+    return titled;
   }
 
-  read(id: string): ProjectedHumanNote | undefined {
+  async read(id: string): Promise<ProjectedHumanNote | undefined> {
+    return this.#coordinator.runRead(() => this.#readUnlocked(id));
+  }
+
+  async #readUnlocked(id: string): Promise<ProjectedHumanNote | undefined> {
+    const projected = this.#projection.humanNote(id);
+    if (!projected) {
+      return undefined;
+    }
+    const source = await readFile(
+      join(this.#directory, basename(projected.canonicalPath)),
+      "utf8"
+    ).catch((error: unknown) => {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+      ) {
+        return undefined;
+      }
+      throw error;
+    });
+    if (source !== undefined) {
+      const current = decodeHumanNote(
+        source,
+        projected.canonicalPath,
+        this.#model
+      );
+      this.#projection.publishHumanNote(current);
+      return current;
+    }
+    await this.rebuildProjection();
     return this.#projection.humanNote(id);
   }
 
@@ -424,6 +546,23 @@ export class HumanNotes {
         parsed.document.set("state", input.state);
         parsed.document.set("tags", input.tags);
         parsed.document.set("aliases", input.aliases);
+        if (input.relationships) {
+          for (const relationship of this.#model.relationships) {
+            if (input.relationships[relationship.key] === undefined) {
+              parsed.document.delete(relationship.key);
+            } else {
+              relationshipValue(
+                input.relationships[relationship.key],
+                relationship,
+                current.canonicalPath
+              );
+              parsed.document.set(
+                relationship.key,
+                input.relationships[relationship.key]
+              );
+            }
+          }
+        }
         for (const [key, value] of Object.entries(input.properties)) {
           parsed.document.set(key, value);
         }
@@ -477,6 +616,103 @@ export class HumanNotes {
     return this.#projection.humanNoteLists();
   }
 
+  async renameToTitle(
+    id: string,
+    baseRevision: string
+  ): Promise<ProjectedHumanNote> {
+    return this.#withWriteLock(async () => {
+      const current = this.#projection.humanNote(id);
+      if (!current) {
+        throw new HumanNoteNotFoundError();
+      }
+      if (current.revision !== baseRevision) {
+        throw new StaleHumanNoteRevisionError(current.revision);
+      }
+      if (current.title === "Untitled note") {
+        throw new InvalidHumanNoteMarkdownError(
+          "Rename to title requires a meaningful H1."
+        );
+      }
+      if (/[\[\]|]/.test(current.title)) {
+        throw new InvalidHumanNoteMarkdownError(
+          "Rename to title requires a title that can be used as a readable wikilink target."
+        );
+      }
+      const titleSlug = readableSlug(current.title);
+      const preferredDestination = `human/notes/${titleSlug}.md`;
+      const destination =
+        preferredDestination === current.canonicalPath
+          ? preferredDestination
+          : await this.#availableCanonicalPath(titleSlug);
+      const transaction = new Map<
+        string,
+        { destinationPath: string; beforeSource: string; source: string }
+      >();
+      for (const directory of ["human/notes", "human/daily"] as const) {
+        const absoluteDirectory = join(this.#vaultPath, directory);
+        for (const filename of await readdir(absoluteDirectory)) {
+          if (!filename.endsWith(".md")) {
+            continue;
+          }
+          const path = join(absoluteDirectory, filename);
+          const source = await readFile(path, "utf8");
+          const rewritten = rewriteWikilinks(
+            source,
+            (target) => this.#projection.targetResolvesTo(target, id),
+            current.title
+          );
+          const isRenamedNote = path === join(
+            this.#directory,
+            basename(current.canonicalPath)
+          );
+          const targetPath = isRenamedNote
+            ? join(this.#directory, basename(destination))
+            : path;
+          if (rewritten !== source || targetPath !== path) {
+            transaction.set(path, {
+              destinationPath: targetPath,
+              beforeSource: source,
+              source: rewritten
+            });
+          }
+        }
+      }
+      for (const { destinationPath: path, source } of transaction.values()) {
+        if (path.startsWith(`${this.#directory}/`)) {
+          decodeHumanNote(
+            source,
+            `human/notes/${basename(path)}`,
+            this.#model
+          );
+        }
+      }
+      const dailyOverrides = new Map(
+        [...transaction]
+          .filter(([path]) =>
+            path.startsWith(`${join(this.#vaultPath, "human/daily")}/`)
+          )
+          .map(([path, file]) => [path, file.source])
+      );
+      const [humanNotes, dailyNotes] = await Promise.all([
+        this.#projectionNotes(transaction),
+        this.#dailyProjectionSnapshots(dailyOverrides)
+      ]);
+      const preparedProjection = this.#projection.prepareAllNotes(
+        humanNotes,
+        dailyNotes
+      );
+      await this.#coordinator.publishTransaction(
+        [...transaction].map(([sourcePath, file]) => ({
+          sourcePath,
+          ...file
+        })),
+        "Rename Human Note to title",
+        () => this.#projection.replaceAllNotes(preparedProjection)
+      );
+      return this.#projection.humanNote(id)!;
+    });
+  }
+
   async #availableCanonicalPath(slug: string): Promise<string> {
     for (let suffix = 1; ; suffix += 1) {
       const filename = suffix === 1 ? `${slug}.md` : `${slug}-${suffix}.md`;
@@ -490,16 +726,6 @@ export class HumanNotes {
   }
 
   async #withWriteLock<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.#writeTail;
-    let release = () => {};
-    this.#writeTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
+    return this.#coordinator.runWrite(operation);
   }
 }

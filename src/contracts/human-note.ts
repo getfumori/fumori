@@ -16,6 +16,10 @@ export const humanNoteResponseSchema = z.object({
   tags: z.array(z.string()),
   aliases: z.array(z.string()),
   properties: z.record(z.string(), organizationModelValueSchema),
+  relationships: z.record(
+    z.string(),
+    z.union([z.string().min(1), z.array(z.string().min(1))])
+  ),
   vault: z.object({
     id: z.uuid(),
     name: z.string().min(1)
@@ -24,6 +28,10 @@ export const humanNoteResponseSchema = z.object({
 
 export const createHumanNoteRequestSchema = z.discriminatedUnion("context", [
   z.object({ context: z.enum(["global", "inbox"]) }),
+  z.object({
+    context: z.literal("wikilink"),
+    target: z.string().trim().min(1).regex(/^[^\[\]\n|]+$/)
+  }),
   z.object({
     context: z.literal("type"),
     type: z.string().regex(/^[a-z][a-z0-9_-]*$/)
@@ -50,7 +58,13 @@ export const saveHumanNoteRequestSchema = z.discriminatedUnion("format", [
     state: z.string().min(1),
     tags: z.array(z.string()),
     aliases: z.array(z.string()),
-    properties: z.record(z.string(), organizationModelValueSchema)
+    properties: z.record(z.string(), organizationModelValueSchema),
+    relationships: z
+      .record(
+        z.string(),
+        z.union([z.string().min(1), z.array(z.string().min(1))])
+      )
+      .optional()
   }),
   z.object({
     format: z.literal("document"),
@@ -60,7 +74,13 @@ export const saveHumanNoteRequestSchema = z.discriminatedUnion("format", [
     state: z.string().min(1),
     tags: z.array(z.string()),
     aliases: z.array(z.string()),
-    properties: z.record(z.string(), organizationModelValueSchema)
+    properties: z.record(z.string(), organizationModelValueSchema),
+    relationships: z
+      .record(
+        z.string(),
+        z.union([z.string().min(1), z.array(z.string().min(1))])
+      )
+      .optional()
   })
 ]);
 

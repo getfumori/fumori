@@ -11,6 +11,12 @@ import {
   type AppConfig,
   appConfigSchema
 } from "../contracts/app-config";
+import {
+  type NoteConnections,
+  type ResolvedWikilink,
+  noteConnectionsResponseSchema,
+  wikilinkSuggestionListSchema
+} from "../contracts/connections";
 import { dailyNoteResponseSchema } from "../contracts/daily-note";
 import {
   type HumanNoteListItem,
@@ -94,6 +100,10 @@ const editorMode = ref<EditorMode>("rich");
 const richEditorSafe = ref(true);
 const rawDraft = ref("");
 const inspectorOpen = ref(false);
+const connections = ref<NoteConnections>();
+const wikilinkSuggestions = ref<
+  Array<{ target: string; title: string; url: string }>
+>([]);
 let searchSequence = 0;
 
 const sectionTitle = computed(() => {
@@ -183,6 +193,7 @@ function configureAutosave(currentNote: HumanNoteResponse): void {
           );
         }
         document.title = `${saved.title} — Fumori`;
+        await refreshConnections(saved.id);
         saveStatus.value = "saved";
         return { revision: saved.revision };
       } catch (reason) {
@@ -192,6 +203,17 @@ function configureAutosave(currentNote: HumanNoteResponse): void {
       }
     }
   });
+}
+
+async function refreshConnections(id: string): Promise<void> {
+  const response = await fetch(`/api/v1/connections/${id}`, {
+    cache: "no-store"
+  });
+  if (response.ok) {
+    connections.value = noteConnectionsResponseSchema.parse(
+      await response.json()
+    );
+  }
 }
 
 async function load(): Promise<void> {
@@ -219,9 +241,14 @@ async function load(): Promise<void> {
     ).vault.name;
 
     if (mode === "note") {
-      const [noteResponse, listResponse] = await Promise.all([
+      const [noteResponse, listResponse, connectionsResponse, suggestionsResponse] =
+        await Promise.all([
         fetch(`/api/v1/notes/${humanNoteMatch![1]}`, { cache: "no-store" }),
-        fetch("/api/v1/notes", { cache: "no-store" })
+        fetch("/api/v1/notes", { cache: "no-store" }),
+        fetch(`/api/v1/connections/${humanNoteMatch![1]}`, {
+          cache: "no-store"
+        }),
+        fetch("/api/v1/wikilinks/suggestions", { cache: "no-store" })
       ]);
       if (!noteResponse.ok) {
         throw new Error(`Note request failed (${noteResponse.status})`);
@@ -229,6 +256,12 @@ async function load(): Promise<void> {
       humanNote.value = humanNoteResponseSchema.parse(await noteResponse.json());
       noteList.value = humanNoteListResponseSchema.parse(
         await listResponse.json()
+      );
+      connections.value = noteConnectionsResponseSchema.parse(
+        await connectionsResponse.json()
+      );
+      wikilinkSuggestions.value = wikilinkSuggestionListSchema.parse(
+        await suggestionsResponse.json()
       );
       rawDraft.value = humanNote.value.sourceMarkdown;
       richEditorSafe.value = isRichMarkdownRoundTripSafe(
@@ -326,7 +359,8 @@ function documentDraft(): Extract<AutosaveDraft, { format: "document" }> {
     state: humanNote.value.state,
     tags: humanNote.value.tags,
     aliases: humanNote.value.aliases,
-    properties: humanNote.value.properties
+    properties: humanNote.value.properties,
+    relationships: humanNote.value.relationships
   };
 }
 
@@ -367,6 +401,67 @@ async function createNote(
     window.location.assign(`/notes/${created.id}`);
   } catch (reason) {
     fatalError.value = explainError(reason, "The note could not be created.");
+  }
+}
+
+async function openWikilink(target: string): Promise<void> {
+  try {
+    await autosave.value?.flush();
+    if (humanNote.value) {
+      await refreshConnections(humanNote.value.id);
+    }
+    const link = connections.value?.outgoing.find(
+      (candidate) => candidate.target === target
+    );
+    if (link?.status === "resolved" && link.url) {
+      await navigateTo(link.url);
+      return;
+    }
+    if (link?.status === "ambiguous") {
+      saveError.value = `Wikilink '${target}' matches more than one note.`;
+      return;
+    }
+    const response = await fetch("/api/v1/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ context: "wikilink", target })
+    });
+    if (!response.ok) {
+      throw new Error(`Create failed (${response.status})`);
+    }
+    const created = humanNoteResponseSchema.parse(await response.json());
+    window.location.assign(`/notes/${created.id}`);
+  } catch (reason) {
+    saveError.value = explainError(reason, "The missing note could not be created.");
+  }
+}
+
+async function renameToTitle(): Promise<void> {
+  if (!humanNote.value) return;
+  try {
+    await autosave.value?.flush();
+    const response = await fetch(
+      `/api/v1/notes/${humanNote.value.id}/rename-to-title`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ baseRevision: humanNote.value.revision })
+      }
+    );
+    if (!response.ok) {
+      const detail = (await response.json().catch(() => undefined)) as
+        | { message?: string }
+        | undefined;
+      throw new Error(detail?.message ?? `Rename failed (${response.status})`);
+    }
+    humanNote.value = humanNoteResponseSchema.parse(await response.json());
+    rawDraft.value = humanNote.value.sourceMarkdown;
+    configureAutosave(humanNote.value);
+    await refreshConnections(humanNote.value.id);
+    saveStatus.value = "saved";
+  } catch (reason) {
+    saveError.value = explainError(reason, "The note was not renamed.");
+    saveStatus.value = "error";
   }
 }
 
@@ -678,6 +773,13 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="editor-mode-button"
+            @click="renameToTitle"
+          >
+            Rename file to title
+          </button>
+          <button
+            type="button"
+            class="editor-mode-button"
             @click="editorMode === 'raw' ? switchToRich() : switchToRaw()"
           >
             {{
@@ -710,8 +812,10 @@ onBeforeUnmount(() => {
           v-if="inspectorOpen && model"
           :model="model"
           :metadata="humanNote"
+          :connections="connections"
           @update="updateMetadata((note) => ({ ...note, ...$event }))"
           @close="inspectorOpen = false"
+          @open-wikilink="openWikilink"
         />
         <div v-if="editorMode === 'protected'" class="protected-markdown">
           <span class="protected-mark" aria-hidden="true">&lt;/&gt;</span>
@@ -731,7 +835,10 @@ onBeforeUnmount(() => {
           v-else
           :model-value="humanNote.bodyMarkdown"
           aria-label="Human Note editor"
+          :wikilinks="connections?.outgoing as ResolvedWikilink[]"
+          :suggestions="wikilinkSuggestions"
           @update="updateBody"
+          @open-wikilink="openWikilink"
         />
         <p v-if="saveError" class="save-error" role="alert">{{ saveError }}</p>
       </section>

@@ -4,6 +4,7 @@ import { dailyNoteDateSchema } from "./daily-note-date.js";
 import { organizationModelValueSchema } from "./organization-model.js";
 
 export const dailyNoteResponseSchema = z.object({
+  id: z.uuid(),
   date: dailyNoteDateSchema,
   exists: z.boolean(),
   revision: z.string().regex(/^[0-9a-f]{64}$/).nullable(),

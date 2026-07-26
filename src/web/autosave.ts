@@ -13,6 +13,7 @@ export type AutosaveDraft =
       tags: string[];
       aliases: string[];
       properties: Record<string, string | number | boolean | string[]>;
+      relationships?: Record<string, string | string[]>;
     }
   | {
       format: "document";
@@ -22,6 +23,7 @@ export type AutosaveDraft =
       tags: string[];
       aliases: string[];
       properties: Record<string, string | number | boolean | string[]>;
+      relationships?: Record<string, string | string[]>;
     };
 
 type SaveInput = {

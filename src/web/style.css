@@ -1185,6 +1185,62 @@ kbd {
   background: #e4e9e2;
 }
 
+.rich-editor [data-wikilink] {
+  cursor: pointer;
+  border-radius: 0.25rem;
+  padding: 0 0.12rem;
+}
+
+.rich-editor [data-wikilink][data-link-status="resolved"] {
+  color: var(--color-accent, #356859);
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+}
+
+.rich-editor [data-wikilink][data-link-status="ambiguous"] {
+  color: #8a641c;
+  text-decoration: underline dotted;
+}
+
+.rich-editor [data-wikilink][data-link-status="unresolved"] {
+  color: #8b4a4a;
+  border-bottom: 1px dashed currentColor;
+}
+
+.wikilink-autocomplete {
+  position: relative;
+  z-index: 4;
+  display: grid;
+  max-width: 24rem;
+  margin-top: 0.4rem;
+  padding: 0.35rem;
+  border: 1px solid rgba(48, 67, 59, 0.18);
+  border-radius: 0.55rem;
+  background: #fffefb;
+  box-shadow: 0 0.8rem 2rem rgba(30, 43, 37, 0.12);
+}
+
+.wikilink-autocomplete button,
+.inspector-link {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 0.45rem 0.55rem;
+  cursor: pointer;
+}
+
+.connection-context {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 1rem;
+}
+
+.connection-context a {
+  color: inherit;
+  padding: 0.3rem 0;
+}
+
 .protected-markdown {
   margin-top: 42px;
   padding: 32px;

@@ -60,7 +60,7 @@ async function stopServer(server: ChildProcess): Promise<void> {
 test("the packed CLI edits canonical Daily Notes through Chromium", async ({
   browser
 }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   const temporaryRoot = await mkdtemp(join(tmpdir(), "fumori-packed-e2e-"));
   let server: ChildProcess | undefined;
 
@@ -340,6 +340,13 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
       "views",
       "active-projects.md"
     );
+    const relatedToPath = join(
+      vault,
+      ".second-brain",
+      "model",
+      "relationships",
+      "related_to.md"
+    );
     const projectTypeSource = `---
 _schema: fumori.model.type
 _version: 1
@@ -387,9 +394,22 @@ query:
 
 # Active projects
 `;
+    const relatedToSource = `---
+_schema: fumori.model.relationship
+_version: 1
+key: related_to
+name: Related to
+cardinality: many
+inverse: related_from
+target_types: [note]
+---
+
+# Related to
+`;
     await Promise.all([
       writeFile(projectTypePath, projectTypeSource, "utf8"),
-      writeFile(activeProjectsViewPath, activeProjectsViewSource, "utf8")
+      writeFile(activeProjectsViewPath, activeProjectsViewSource, "utf8"),
+      writeFile(relatedToPath, relatedToSource, "utf8")
     ]);
     server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
       cwd: temporaryRoot,
@@ -616,10 +636,119 @@ query:
     await page.reload();
     await expect(standaloneEditor).toContainText("Lantern Archive");
 
+    await page.goto(rawRestartedUrl);
+    const connectedDailyEditor = page
+      .getByTestId("rich-editor")
+      .locator("[contenteditable='true']");
+    await connectedDailyEditor.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("[[Lan");
+    await page
+      .getByRole("option", { name: "Lantern Archive" })
+      .click();
+    await page
+      .getByTestId("rich-editor")
+      .getByText("Lantern Archive")
+      .last()
+      .click();
+    await expect(page).toHaveURL(firstStandaloneUrl);
+
+    await page.getByRole("link", { name: "Notes", exact: true }).click();
+    await page
+      .locator("[data-zone='primary']")
+      .getByRole("button", { name: "New note" })
+      .click();
+    await expect(page).toHaveURL(/\/notes\/[0-9a-f-]{36}$/);
+    const mapUrl = page.url();
+    const mapEditor = page
+      .getByTestId("rich-editor")
+      .locator("[contenteditable='true']");
+    await mapEditor.fill("# Trail Map\n\n[[Lan");
+    await page
+      .getByRole("option", { name: "Lantern Archive" })
+      .click();
+    await expect(mapEditor).toContainText("Lantern Archive");
+    await mapEditor.getByText("Lantern Archive").click();
+    await expect(page).toHaveURL(firstStandaloneUrl);
+    await page.goBack();
+    await expect(page).toHaveURL(mapUrl);
+    await page.getByRole("button", { name: "Inspector" }).click();
+    const mapInspector = page.getByRole("form", {
+      name: "Document inspector"
+    });
+    await mapInspector.getByLabel("Related to").fill("[[Lantern Archive]]");
+    await page.keyboard.press("Control+s");
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+    await expect
+      .poll(() =>
+        readFile(join(vault, "human", "notes", "trail-map.md"), "utf8")
+      )
+      .toContain('related_to:\n  - "[[Lantern Archive]]"');
+    await mapEditor.getByText("Lantern Archive").click();
+    await expect(page).toHaveURL(firstStandaloneUrl);
+    await page.getByRole("button", { name: "Inspector" }).click();
+    await expect(
+      page.getByRole("form", { name: "Document inspector" })
+        .getByRole("link", { name: "Trail Map", exact: true })
+    ).toBeVisible();
+    await page
+      .getByTestId("rich-editor")
+      .getByRole("heading", { name: "Lantern Archive", level: 1 })
+      .fill("Lantern Beacon");
+    await page.keyboard.press("Control+s");
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+    expect(await readdir(join(vault, "human", "notes"))).toContain(
+      "lantern-archive.md"
+    );
+    await page.getByRole("button", { name: "Rename file to title" }).click();
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+    await expect
+      .poll(() => readdir(join(vault, "human", "notes")))
+      .toContain("lantern-beacon.md");
+    const canonicalMapAfterRename = await readFile(
+      join(vault, "human", "notes", "trail-map.md"),
+      "utf8"
+    );
+    expect(
+      canonicalMapAfterRename.slice(
+        canonicalMapAfterRename.indexOf("\n---\n") + "\n---\n".length
+      )
+    ).toContain("[[Lantern Beacon]]");
+    await expect.poll(() => readFile(dailyPath, "utf8")).toContain(
+      "[[Lantern Beacon]]"
+    );
+    const mapAfterRename = (await (
+      await fetch(
+        `${rawRestartedUrl}/api/v1/notes/${mapUrl.split("/").at(-1)!}`
+      )
+    ).json()) as { bodyMarkdown: string };
+    expect(mapAfterRename.bodyMarkdown).toContain("[[Lantern Beacon]]");
+    await page.goto(mapUrl);
+    await expect(
+      page.getByTestId("rich-editor").getByText("Lantern Beacon")
+    ).toBeVisible();
+    await mapEditor.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("[[Missing Grove]]");
+    await page.keyboard.press("Control+s");
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+    await page.getByTestId("rich-editor").getByText("Missing Grove").click();
+    await expect(page).toHaveURL(/\/notes\/[0-9a-f-]{36}$/);
+    await expect(
+      page.getByRole("heading", { name: "Missing Grove", level: 1 })
+        .first()
+    ).toBeVisible();
+    await page.goto(firstStandaloneUrl);
+    await expect(
+      page.getByTestId("rich-editor").getByText("Lantern Beacon")
+    ).toBeVisible();
+
     const secondTab = await context.newPage();
     await secondTab.goto(firstStandaloneUrl);
     await expect(
-      secondTab.getByTestId("rich-editor").getByText("Lantern Archive")
+      secondTab.getByTestId("rich-editor").getByText("Lantern Beacon")
     ).toBeVisible();
     await secondTab.close();
 
@@ -629,11 +758,11 @@ query:
     await expect(page).toHaveURL(firstStandaloneUrl);
     await page.goForward();
     await expect(page).toHaveURL(`${rawRestartedUrl}/notes`);
-    await expect(page.getByRole("link", { name: "Lantern Archive" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Lantern Beacon" })).toBeVisible();
 
     await page.getByRole("link", { name: "Inbox", exact: true }).click();
     await expect(page).toHaveURL(`${rawRestartedUrl}/inbox`);
-    await expect(page.getByRole("link", { name: "Lantern Archive" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Lantern Beacon" })).toBeVisible();
     await page
       .getByRole("button", { name: "Capture note" })
       .evaluate((button: HTMLButtonElement) => button.click());
@@ -708,10 +837,10 @@ query:
     await expect(page).toHaveURL(`${rawRestartedUrl}/search`);
     const search = page.getByRole("searchbox", { name: "Search notes" });
     await search.fill("winter signal");
-    await expect(page.getByRole("link", { name: "Lantern Archive" })).toContainText(
+    await expect(page.getByRole("link", { name: "Lantern Beacon" })).toContainText(
       "winter signal"
     );
-    await page.getByRole("link", { name: "Lantern Archive" }).click();
+    await page.getByRole("link", { name: "Lantern Beacon" }).click();
     await expect(page).toHaveURL(firstStandaloneUrl);
 
     await page.keyboard.press("Control+k");

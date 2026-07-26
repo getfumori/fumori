@@ -18,6 +18,7 @@ const OWNERSHIP_ZONES = [
   "assets",
   "human/daily",
   "human/notes",
+  ".second-brain/model/relationships",
   "knowledge",
   "sources/files",
   "sources/records"

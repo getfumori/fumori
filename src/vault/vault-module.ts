@@ -20,6 +20,7 @@ import {
   type OrganizationModel
 } from "./organization-model.js";
 import { openVault } from "./open.js";
+import { RepositoryCoordinator } from "./repository-coordinator.js";
 
 export {
   ExplicitDailyNoteCreationRequiredError,
@@ -63,16 +64,30 @@ export class VaultModule {
     today: () => string
   ): Promise<VaultModule> {
     const vault = await openVault(inputPath);
+    const coordinator = await RepositoryCoordinator.open(vault.path);
     const model = await loadOrganizationModel(vault.path);
     const projection = new InMemoryProjection({
       inboxState: model.inboxState,
-      archivedState: model.archivedState
+      archivedState: model.archivedState,
+      relationships: model.relationships
     });
-    const dailyNotes = new DailyNotes(vault.path, today, model, (note) => {
-      projection.publishDailyNote(note);
-    });
+    const dailyNotes = new DailyNotes(
+      vault.path,
+      today,
+      model,
+      coordinator,
+      (note) => {
+        projection.publishDailyNote(note);
+      }
+    );
     await dailyNotes.rebuildProjection();
-    const humanNotes = new HumanNotes(vault.path, projection, model);
+    const humanNotes = new HumanNotes(
+      vault.path,
+      projection,
+      model,
+      coordinator,
+      (overrides) => dailyNotes.projectionSnapshots(overrides)
+    );
     await humanNotes.rebuildProjection();
     return new VaultModule({
       identity: { id: vault.id, name: vault.name },
@@ -100,12 +115,12 @@ export class VaultModule {
     return this.#dailyNotes.create(date);
   }
 
-  humanNote(id: string): ProjectedHumanNote | undefined {
+  humanNote(id: string): Promise<ProjectedHumanNote | undefined> {
     return this.#humanNotes.read(id);
   }
 
-  createHumanNote(type?: string): Promise<ProjectedHumanNote> {
-    return this.#humanNotes.create(type);
+  createHumanNote(type?: string, title?: string): Promise<ProjectedHumanNote> {
+    return this.#humanNotes.create(type, title);
   }
 
   saveHumanNote(
@@ -117,6 +132,18 @@ export class VaultModule {
 
   humanNoteLists(): ReturnType<HumanNotes["lists"]> {
     return this.#humanNotes.lists();
+  }
+
+  noteConnections(id: string) {
+    return this.#projection.connections(id);
+  }
+
+  wikilinkSuggestions(query: string) {
+    return this.#projection.suggestions(query);
+  }
+
+  renameHumanNoteToTitle(id: string, baseRevision: string) {
+    return this.#humanNotes.renameToTitle(id, baseRevision);
   }
 
   search(query: string) {
@@ -134,11 +161,13 @@ export class VaultModule {
   modelSummary(): {
     states: string[];
     types: readonly TypeDefinition[];
+    relationships: OrganizationModel["relationships"];
     views: readonly SavedView[];
   } {
     return {
       states: [...this.#model.states],
       types: this.#model.types,
+      relationships: this.#model.relationships,
       views: this.#model.views
     };
   }

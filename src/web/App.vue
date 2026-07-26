@@ -11,6 +11,11 @@ import {
   appConfigSchema
 } from "../contracts/app-config";
 import {
+  type NoteConnections,
+  noteConnectionsResponseSchema,
+  wikilinkSuggestionListSchema
+} from "../contracts/connections";
+import {
   type DailyNoteResponse,
   dailyNoteResponseSchema
 } from "../contracts/daily-note";
@@ -54,6 +59,10 @@ const editorMode = ref<EditorMode>("rich");
 const richEditorSafe = ref(true);
 const rawDraft = ref("");
 const inspectorOpen = ref(false);
+const connections = ref<NoteConnections>();
+const wikilinkSuggestions = ref<
+  Array<{ target: string; title: string; url: string }>
+>([]);
 
 const displayTitle = computed(() =>
   isTodayRoute ? "Today" : (note.value?.date ?? historicalDate ?? "")
@@ -156,6 +165,7 @@ function configureAutosave(currentNote: DailyNoteResponse): void {
         richEditorSafe.value = isRichMarkdownRoundTripSafe(
           saved.bodyMarkdown
         );
+        await refreshConnections(saved.id);
         saveStatus.value = "saved";
         return { revision: saved.revision! };
       } catch (reason) {
@@ -167,15 +177,28 @@ function configureAutosave(currentNote: DailyNoteResponse): void {
   });
 }
 
+async function refreshConnections(id: string): Promise<void> {
+  const response = await fetch(`/api/v1/connections/${id}`, {
+    cache: "no-store"
+  });
+  if (response.ok) {
+    connections.value = noteConnectionsResponseSchema.parse(
+      await response.json()
+    );
+  }
+}
+
 async function load(): Promise<void> {
   try {
     const noteEndpoint = historicalDate
       ? `/api/v1/daily/${historicalDate}`
       : "/api/v1/today";
-    const [configResponse, noteResponse, modelResponse] = await Promise.all([
+    const [configResponse, noteResponse, modelResponse, suggestionsResponse] =
+      await Promise.all([
       fetch("/api/v1/config", { cache: "no-store" }),
       fetch(noteEndpoint, { cache: "no-store" }),
-      fetch("/api/v1/model", { cache: "no-store" })
+      fetch("/api/v1/model", { cache: "no-store" }),
+      fetch("/api/v1/wikilinks/suggestions", { cache: "no-store" })
     ]);
     if (!configResponse.ok) {
       throw new Error(`Configuration request failed (${configResponse.status})`);
@@ -188,6 +211,9 @@ async function load(): Promise<void> {
     }
     config.value = appConfigSchema.parse(await configResponse.json());
     note.value = dailyNoteResponseSchema.parse(await noteResponse.json());
+    wikilinkSuggestions.value = wikilinkSuggestionListSchema.parse(
+      await suggestionsResponse.json()
+    );
     model.value = organizationModelResponseSchema.parse(
       await modelResponse.json()
     );
@@ -199,6 +225,9 @@ async function load(): Promise<void> {
     document.title = `${displayTitle.value} — Fumori`;
     if (isTodayRoute || note.value.exists) {
       configureAutosave(note.value);
+    }
+    if (note.value.exists) {
+      await refreshConnections(note.value.id);
     }
   } catch (reason) {
     fatalError.value = explainError(
@@ -337,6 +366,38 @@ async function createStandaloneNote(): Promise<void> {
   } catch (reason) {
     saveError.value = explainError(reason, "The note could not be created.");
     saveStatus.value = "error";
+  }
+}
+
+async function openWikilink(target: string): Promise<void> {
+  try {
+    await autosave.value?.flush();
+    if (note.value?.exists) {
+      await refreshConnections(note.value.id);
+    }
+    const link = connections.value?.outgoing.find(
+      (candidate) => candidate.target === target
+    );
+    if (link?.status === "resolved" && link.url) {
+      await navigateTo(link.url);
+      return;
+    }
+    if (link?.status === "ambiguous") {
+      saveError.value = `Wikilink '${target}' matches more than one note.`;
+      return;
+    }
+    const response = await fetch("/api/v1/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ context: "wikilink", target })
+    });
+    if (!response.ok) {
+      throw new Error(`Create failed (${response.status})`);
+    }
+    const created = humanNoteResponseSchema.parse(await response.json());
+    window.location.assign(`/notes/${created.id}`);
+  } catch (reason) {
+    saveError.value = explainError(reason, "The missing note could not be created.");
   }
 }
 
@@ -513,9 +574,11 @@ onBeforeUnmount(() => {
           v-if="inspectorOpen && model && (note.exists || isTodayRoute)"
           :model="model"
           :metadata="note"
+          :connections="connections"
           type-locked
           @update="updateMetadata"
           @close="inspectorOpen = false"
+          @open-wikilink="openWikilink"
         />
 
         <div
@@ -562,7 +625,10 @@ onBeforeUnmount(() => {
           </div>
           <RichMarkdownEditor
             :model-value="note.bodyMarkdown"
+            :wikilinks="connections?.outgoing"
+            :suggestions="wikilinkSuggestions"
             @update="updateBody"
+            @open-wikilink="openWikilink"
           />
         </template>
         <p v-if="saveError" class="save-error" role="alert">

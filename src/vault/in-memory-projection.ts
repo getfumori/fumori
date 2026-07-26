@@ -3,35 +3,81 @@ import type {
   HumanNoteResponse
 } from "../contracts/human-note.js";
 import type {
+  NoteConnections,
+  ResolvedWikilink
+} from "../contracts/connections.js";
+import type {
   OrganizationModelValue,
   QueryFilter,
   QueryPredicate,
   QuerySpec,
+  RelationshipDefinition,
   StructuredNoteItem
 } from "../contracts/organization-model.js";
 import type { SearchResult } from "../contracts/search.js";
 import type { DailyNoteSnapshot } from "./daily-notes.js";
+import { wikilinks } from "./wikilinks.js";
 
 export type ProjectedHumanNote = Omit<HumanNoteResponse, "vault"> & {
   created: string;
 };
 
+export type PreparedProjection = {
+  humanNotes: Map<string, ProjectedHumanNote>;
+  dailyNotes: Map<string, ProjectedDailyNote>;
+};
+
 export class InMemoryProjection {
-  readonly #humanNotes = new Map<string, ProjectedHumanNote>();
-  readonly #dailyNotes = new Map<string, ProjectedDailyNote>();
+  #humanNotes = new Map<string, ProjectedHumanNote>();
+  #dailyNotes = new Map<string, ProjectedDailyNote>();
   readonly #inboxState: string;
   readonly #archivedState: string;
+  readonly #relationships: readonly RelationshipDefinition[];
 
   constructor(options: {
     inboxState: string;
     archivedState: string;
+    relationships: readonly RelationshipDefinition[];
   }) {
     this.#inboxState = options.inboxState;
     this.#archivedState = options.archivedState;
+    this.#relationships = options.relationships;
   }
 
   publishHumanNote(note: ProjectedHumanNote): void {
     this.#humanNotes.set(note.id, note);
+  }
+
+  replaceHumanNotes(notes: readonly ProjectedHumanNote[]): void {
+    this.#humanNotes.clear();
+    for (const note of notes) {
+      this.#humanNotes.set(note.id, note);
+    }
+  }
+
+  prepareAllNotes(
+    humanNotes: readonly ProjectedHumanNote[],
+    dailyNotes: readonly DailyNoteSnapshot[]
+  ): PreparedProjection {
+    const projectedDailyNotes = dailyNotes
+      .map(toProjectedDailyNote)
+      .filter((note): note is ProjectedDailyNote => note !== undefined);
+    const prepared: PreparedProjection = {
+      humanNotes: new Map(),
+      dailyNotes: new Map()
+    };
+    for (const note of humanNotes) {
+      prepared.humanNotes.set(note.id, note);
+    }
+    for (const note of projectedDailyNotes) {
+      prepared.dailyNotes.set(note.title, note);
+    }
+    return prepared;
+  }
+
+  replaceAllNotes(prepared: PreparedProjection): void {
+    this.#humanNotes = prepared.humanNotes;
+    this.#dailyNotes = prepared.dailyNotes;
   }
 
   humanNote(id: string): ProjectedHumanNote | undefined {
@@ -83,30 +129,10 @@ export class InMemoryProjection {
   }
 
   publishDailyNote(note: DailyNoteSnapshot): void {
-    if (!note.exists || !note.revision || !note.sourceMarkdown) {
-      return;
+    const projected = toProjectedDailyNote(note);
+    if (projected) {
+      this.#dailyNotes.set(note.date, projected);
     }
-    const id = note.sourceMarkdown.match(/^_id:\s*(.+?)\s*$/m)?.[1];
-    if (!id) {
-      throw new Error(`Daily Note is missing '_id': ${note.date}`);
-    }
-    this.#dailyNotes.set(note.date, {
-      kind: "daily-note",
-      id,
-      created:
-        note.sourceMarkdown.match(/^_created:\s*(.+?)\s*$/m)?.[1] ?? "",
-      title: note.date,
-      canonicalPath: `human/daily/${note.date}.md`,
-      url: `/daily/${note.date}`,
-      revision: note.revision,
-      bodyMarkdown: note.bodyMarkdown,
-      sourceMarkdown: note.sourceMarkdown,
-      type: note.type,
-      state: note.state,
-      tags: note.tags,
-      aliases: note.aliases,
-      properties: note.properties
-    });
   }
 
   search(query: string): SearchResult[] {
@@ -137,9 +163,143 @@ export class InMemoryProjection {
         snippet: searchSnippet(document, query)
       }));
   }
+
+  suggestions(query: string): Array<{ target: string; title: string; url: string }> {
+    const normalized = query.trim().toLocaleLowerCase();
+    return this.#documents()
+      .filter(
+        (note) =>
+          !normalized ||
+          [note.title, ...note.aliases].some((value) =>
+            value.toLocaleLowerCase().includes(normalized)
+          )
+      )
+      .sort((left, right) => left.title.localeCompare(right.title))
+      .map((note) => ({
+        target: note.title,
+        title: note.title,
+        url: noteUrl(note)
+      }));
+  }
+
+  connections(id: string): NoteConnections | undefined {
+    const note = this.#documents().find((candidate) => candidate.id === id);
+    if (!note) {
+      return undefined;
+    }
+    const outgoing = wikilinks(note.bodyMarkdown).map((link) =>
+      this.#resolve(link)
+    );
+    const backlinks = this.#documents()
+      .filter((source) =>
+        wikilinks(source.bodyMarkdown).some(
+          (link) =>
+            this.#resolve(link).status === "resolved" &&
+            this.#resolve(link).matches[0]?.id === id
+        )
+      )
+      .map(linkedNote);
+    const relationships = this.#relationships.flatMap((definition) => {
+      const value =
+        "relationships" in note
+          ? note.relationships[definition.key]
+          : undefined;
+      if (value === undefined) {
+        return [];
+      }
+      const values = Array.isArray(value) ? value : [value];
+      return [
+        {
+          key: definition.key,
+          name: definition.name,
+          cardinality: definition.cardinality,
+          targets: values.flatMap(wikilinks).map((link) => this.#resolve(link))
+        }
+      ];
+    });
+    const inverseRelationships = this.#documents().flatMap((source) => {
+      if (!("relationships" in source)) {
+        return [];
+      }
+      return this.#relationships.flatMap((definition) => {
+        const value = source.relationships[definition.key];
+        if (value === undefined) {
+          return [];
+        }
+        const values = Array.isArray(value) ? value : [value];
+        return values.some((entry) =>
+          wikilinks(entry).some((link) => {
+            const resolved = this.#resolve(link);
+            return (
+              resolved.status === "resolved" &&
+              resolved.matches[0]?.id === id
+            );
+          })
+        )
+          ? [{ key: definition.inverse, source: linkedNote(source) }]
+          : [];
+      });
+    });
+    return { outgoing, backlinks, relationships, inverseRelationships };
+  }
+
+  targetResolvesTo(target: string, id: string): boolean {
+    const resolved = this.#resolve({
+      target,
+      label: target,
+      sourceMarkdown: `[[${target}]]`
+    });
+    return resolved.status === "resolved" && resolved.matches[0]?.id === id;
+  }
+
+  readonlyDocuments(): readonly (ProjectedHumanNote | ProjectedDailyNote)[] {
+    return this.#documents();
+  }
+
+  #documents(): Array<ProjectedHumanNote | ProjectedDailyNote> {
+    return [...this.#humanNotes.values(), ...this.#dailyNotes.values()];
+  }
+
+  #resolve(link: {
+    target: string;
+    label: string;
+    sourceMarkdown: string;
+  }): ResolvedWikilink {
+    const normalized = link.target.toLocaleLowerCase();
+    const normalizedKey = linkKey(link.target);
+    const matches = this.#documents().filter((note) => {
+      const filename = note.canonicalPath.split("/").at(-1)!.replace(/\.md$/, "");
+      return [note.title, filename, ...note.aliases].some((candidate) => {
+        return (
+          candidate.toLocaleLowerCase() === normalized ||
+          linkKey(candidate) === normalizedKey
+        );
+      });
+    });
+    return {
+      ...link,
+      status:
+        matches.length === 1
+          ? "resolved"
+          : matches.length > 1
+            ? "ambiguous"
+            : "unresolved",
+      url: matches.length === 1 ? noteUrl(matches[0]!) : null,
+      matches: matches.map(linkedNote)
+    };
+  }
 }
 
-type ProjectedDailyNote = {
+function linkKey(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/\p{Mark}/gu, "")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export type ProjectedDailyNote = {
   kind: "daily-note";
   id: string;
   created: string;
@@ -155,6 +315,43 @@ type ProjectedDailyNote = {
   aliases: string[];
   properties: Record<string, OrganizationModelValue>;
 };
+
+function toProjectedDailyNote(
+  note: DailyNoteSnapshot
+): ProjectedDailyNote | undefined {
+  if (!note.exists || !note.revision || !note.sourceMarkdown) {
+    return undefined;
+  }
+  return {
+    kind: "daily-note",
+    id: note.id,
+    created:
+      note.sourceMarkdown.match(/^_created:\s*(.+?)\s*$/m)?.[1] ?? "",
+    title: note.date,
+    canonicalPath: `human/daily/${note.date}.md`,
+    url: `/daily/${note.date}`,
+    revision: note.revision,
+    bodyMarkdown: note.bodyMarkdown,
+    sourceMarkdown: note.sourceMarkdown,
+    type: note.type,
+    state: note.state,
+    tags: note.tags,
+    aliases: note.aliases,
+    properties: note.properties
+  };
+}
+
+function noteUrl(note: ProjectedHumanNote | ProjectedDailyNote): string {
+  return "kind" in note ? note.url : `/notes/${note.id}`;
+}
+
+function linkedNote(note: ProjectedHumanNote | ProjectedDailyNote): {
+  id: string;
+  title: string;
+  url: string;
+} {
+  return { id: note.id, title: note.title, url: noteUrl(note) };
+}
 
 function toListItem(
   note: Pick<

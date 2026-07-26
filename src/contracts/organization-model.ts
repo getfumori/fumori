@@ -56,6 +56,14 @@ export const typeDefinitionSchema = z.object({
   properties: z.array(typePropertySchema)
 });
 
+export const relationshipDefinitionSchema = z.object({
+  key: schemaKeySchema,
+  name: z.string().min(1),
+  cardinality: z.enum(["one", "many"]),
+  inverse: schemaKeySchema,
+  targetTypes: z.array(schemaKeySchema)
+});
+
 export const queryPredicateSchema = z
   .object({
     field: z.string().regex(/^[a-z_][a-z0-9_-]*$/),
@@ -125,6 +133,7 @@ export const savedViewListResponseSchema = z.array(savedViewSchema);
 export const organizationModelResponseSchema = z.object({
   states: z.array(z.string().min(1)),
   types: z.array(typeDefinitionSchema),
+  relationships: z.array(relationshipDefinitionSchema),
   views: z.array(savedViewSchema)
 });
 
@@ -164,6 +173,9 @@ export type OrganizationModelValue = z.infer<
 >;
 export type TypeProperty = z.infer<typeof typePropertySchema>;
 export type TypeDefinition = z.infer<typeof typeDefinitionSchema>;
+export type RelationshipDefinition = z.infer<
+  typeof relationshipDefinitionSchema
+>;
 export type QueryPredicate = z.infer<typeof queryPredicateSchema>;
 export type QuerySpec = z.infer<typeof querySpecSchema>;
 export type SavedView = z.infer<typeof savedViewSchema>;

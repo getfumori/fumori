@@ -4,9 +4,14 @@ import { Markdown } from "@tiptap/markdown";
 import StarterKit from "@tiptap/starter-kit";
 
 import { opaqueMarkdownExtensions } from "./OpaqueMarkdownBlock.js";
-import { PreservedWikilink } from "./PreservedWikilink.js";
+import {
+  PreservedWikilink,
+  type WikilinkPresentation
+} from "./PreservedWikilink.js";
 
-export function createFoundationMarkdownExtensions(): Extensions {
+export function createFoundationMarkdownExtensions(options?: {
+  resolveWikilink?: (target: string) => WikilinkPresentation;
+}): Extensions {
   return [
     StarterKit.configure({
       heading: { levels: [1, 2, 3] },
@@ -20,7 +25,11 @@ export function createFoundationMarkdownExtensions(): Extensions {
     Markdown.configure({
       markedOptions: { gfm: true }
     }),
-    PreservedWikilink,
+    PreservedWikilink.configure({
+      resolve:
+        options?.resolveWikilink ??
+        (() => ({ status: "unresolved", url: null }))
+    }),
     ...opaqueMarkdownExtensions
   ];
 }

@@ -8,6 +8,11 @@ import { Hono, type Context } from "hono";
 
 import { appConfigSchema } from "../contracts/app-config.js";
 import {
+  noteConnectionsResponseSchema,
+  renameToTitleRequestSchema,
+  wikilinkSuggestionListSchema
+} from "../contracts/connections.js";
+import {
   dailyNoteResponseSchema,
   explicitCreationRequiredResponseSchema,
   invalidCanonicalMarkdownResponseSchema,
@@ -188,7 +193,8 @@ export async function startServer(
   app.post("/api/v1/notes", async (context) => {
     const input = createHumanNoteRequestSchema.parse(await context.req.json());
     const note = await vault.createHumanNote(
-      input.context === "type" ? input.type : undefined
+      input.context === "type" ? input.type : undefined,
+      input.context === "wikilink" ? input.target : undefined
     );
     context.header("Cache-Control", "no-store");
     return context.json(
@@ -199,8 +205,8 @@ export async function startServer(
       201
     );
   });
-  app.get("/api/v1/notes/:id", (context) => {
-    const note = vault.humanNote(context.req.param("id"));
+  app.get("/api/v1/notes/:id", async (context) => {
+    const note = await vault.humanNote(context.req.param("id"));
     if (!note) {
       return context.json({ error: "not_found" }, 404);
     }
@@ -211,6 +217,64 @@ export async function startServer(
         vault: vault.identity
       })
     );
+  });
+  app.get("/api/v1/notes/:id/connections", (context) => {
+    const connections = vault.noteConnections(context.req.param("id"));
+    if (!connections) {
+      return context.json({ error: "not_found" }, 404);
+    }
+    context.header("Cache-Control", "no-store");
+    return context.json(noteConnectionsResponseSchema.parse(connections));
+  });
+  app.get("/api/v1/connections/:id", (context) => {
+    const connections = vault.noteConnections(context.req.param("id"));
+    if (!connections) {
+      return context.json({ error: "not_found" }, 404);
+    }
+    context.header("Cache-Control", "no-store");
+    return context.json(noteConnectionsResponseSchema.parse(connections));
+  });
+  app.get("/api/v1/wikilinks/suggestions", (context) => {
+    context.header("Cache-Control", "no-store");
+    return context.json(
+      wikilinkSuggestionListSchema.parse(
+        vault.wikilinkSuggestions(context.req.query("q") ?? "")
+      )
+    );
+  });
+  app.post("/api/v1/notes/:id/rename-to-title", async (context) => {
+    const input = renameToTitleRequestSchema.parse(await context.req.json());
+    try {
+      const note = await vault.renameHumanNoteToTitle(
+        context.req.param("id"),
+        input.baseRevision
+      );
+      context.header("Cache-Control", "no-store");
+      return context.json(
+        humanNoteResponseSchema.parse({ ...note, vault: vault.identity })
+      );
+    } catch (error) {
+      context.header("Cache-Control", "no-store");
+      if (error instanceof HumanNoteNotFoundError) {
+        return context.json({ error: "not_found" }, 404);
+      }
+      if (error instanceof StaleHumanNoteRevisionError) {
+        return context.json(
+          {
+            error: "stale_revision",
+            currentRevision: error.currentRevision
+          },
+          409
+        );
+      }
+      if (error instanceof InvalidHumanNoteMarkdownError) {
+        return context.json(
+          { error: "invalid_canonical_markdown", message: error.message },
+          422
+        );
+      }
+      throw error;
+    }
   });
   app.put("/api/v1/notes/:id", async (context) => {
     const input = saveHumanNoteRequestSchema.parse(await context.req.json());

@@ -16,6 +16,7 @@ import {
 } from "../contracts/organization-model.js";
 import { atomicReplace } from "./atomic-publication.js";
 import type { OrganizationModel } from "./organization-model.js";
+import type { RepositoryCoordinator } from "./repository-coordinator.js";
 
 type DailyNoteMetadata = {
   id: string;
@@ -29,6 +30,7 @@ type DailyNoteMetadata = {
 };
 
 export type DailyNoteSnapshot = {
+  id: string;
   date: string;
   exists: boolean;
   revision: string | null;
@@ -270,7 +272,7 @@ export class DailyNotes {
   readonly #dailyDirectory: string;
   readonly #today: () => string;
   readonly #model: OrganizationModel;
-  readonly #writeTails = new Map<string, Promise<void>>();
+  readonly #coordinator: RepositoryCoordinator;
   readonly #virtualMetadata = new Map<string, DailyNoteMetadata>();
   readonly #onPublication:
     | ((note: DailyNoteSnapshot) => void)
@@ -280,15 +282,21 @@ export class DailyNotes {
     vaultPath: string,
     today: () => string,
     model: OrganizationModel,
+    coordinator: RepositoryCoordinator,
     onPublication?: (note: DailyNoteSnapshot) => void
   ) {
     this.#dailyDirectory = join(vaultPath, "human", "daily");
     this.#today = today;
     this.#model = model;
+    this.#coordinator = coordinator;
     this.#onPublication = onPublication;
   }
 
   async read(dateInput: string): Promise<DailyNoteSnapshot> {
+    return this.#coordinator.runRead(() => this.#readUnlocked(dateInput));
+  }
+
+  async #readUnlocked(dateInput: string): Promise<DailyNoteSnapshot> {
     const date = dailyNoteDateSchema.parse(dateInput);
     const path = join(this.#dailyDirectory, `${date}.md`);
     const source = await readFile(path, "utf8").catch((error: unknown) => {
@@ -311,6 +319,10 @@ export class DailyNotes {
         ...this.#publicMetadata(this.#metadataForMissing(date))
       };
     }
+    return this.#snapshotFromSource(date, source);
+  }
+
+  #snapshotFromSource(date: string, source: string): DailyNoteSnapshot {
     const decoded = decodeDailyNote(source, date, this.#model);
     return {
       date,
@@ -323,13 +335,29 @@ export class DailyNotes {
   }
 
   async rebuildProjection(): Promise<void> {
+    for (const note of await this.projectionSnapshots()) {
+      this.#onPublication?.(note);
+    }
+  }
+
+  async projectionSnapshots(
+    overrides: ReadonlyMap<string, string> = new Map()
+  ): Promise<DailyNoteSnapshot[]> {
+    const snapshots: DailyNoteSnapshot[] = [];
     for (const filename of await readdir(this.#dailyDirectory)) {
       const date = filename.match(/^(\d{4}-\d{2}-\d{2})\.md$/)?.[1];
       if (!date) {
         continue;
       }
-      this.#onPublication?.(await this.read(date));
+      const path = join(this.#dailyDirectory, filename);
+      snapshots.push(
+        this.#snapshotFromSource(
+          date,
+          overrides.get(path) ?? (await readFile(path, "utf8"))
+        )
+      );
     }
+    return snapshots;
   }
 
   async save(
@@ -452,6 +480,7 @@ export class DailyNotes {
 
   #publicMetadata(metadata: DailyNoteMetadata) {
     return {
+      id: metadata.id,
       type: "daily-note" as const,
       state: metadata.state,
       tags: metadata.tags,
@@ -499,20 +528,7 @@ export class DailyNotes {
   }
 
   async #withWriteLock<T>(date: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.#writeTails.get(date) ?? Promise.resolve();
-    let release = () => {};
-    const tail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.#writeTails.set(date, tail);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.#writeTails.get(date) === tail) {
-        this.#writeTails.delete(date);
-      }
-    }
+    dailyNoteDateSchema.parse(date);
+    return this.#coordinator.runWrite(operation);
   }
 }

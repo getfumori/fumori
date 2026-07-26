@@ -6,10 +6,12 @@ import { z } from "zod";
 
 import {
   queryFilterSchema,
+  relationshipDefinitionSchema,
   schemaKeySchema,
   typePropertySchema,
   type QueryFilter,
   type QuerySpec,
+  type RelationshipDefinition,
   type SavedView,
   type TypeDefinition
 } from "../contracts/organization-model.js";
@@ -72,6 +74,15 @@ const viewFileSchema = z.object({
   space: z.literal("human"),
   query: queryFileSchema
 });
+const relationshipFileSchema = z.object({
+  _schema: z.literal("fumori.model.relationship"),
+  _version: z.literal(1),
+  key: schemaKeySchema,
+  name: z.string().min(1),
+  cardinality: z.enum(["one", "many"]),
+  inverse: schemaKeySchema,
+  target_types: z.array(schemaKeySchema).optional().default([])
+});
 
 export type OrganizationModel = {
   states: ReadonlySet<string>;
@@ -79,8 +90,10 @@ export type OrganizationModel = {
   inboxState: string;
   archivedState: string;
   types: readonly TypeDefinition[];
+  relationships: readonly RelationshipDefinition[];
   views: readonly SavedView[];
   type(key: string): TypeDefinition | undefined;
+  relationship(key: string): RelationshipDefinition | undefined;
   view(key: string): SavedView | undefined;
 };
 
@@ -104,7 +117,7 @@ function frontmatter(source: string, path: string): unknown {
 
 async function modelDocuments(
   vaultPath: string,
-  directory: "types" | "views"
+  directory: "types" | "views" | "relationships"
 ): Promise<Array<{ path: string; value: unknown }>> {
   const relativeDirectory = `.second-brain/model/${directory}`;
   const filenames = (await readdir(join(vaultPath, relativeDirectory)))
@@ -167,19 +180,44 @@ function publicView(
   };
 }
 
+function publicRelationship(
+  value: z.infer<typeof relationshipFileSchema>,
+  path: string
+): RelationshipDefinition {
+  if (`${value.key}.md` !== path.split("/").at(-1)) {
+    throw new Error(
+      `Relationship key '${value.key}' does not match its filename: ${path}`
+    );
+  }
+  return relationshipDefinitionSchema.parse({
+    key: value.key,
+    name: value.name,
+    cardinality: value.cardinality,
+    inverse: value.inverse,
+    targetTypes: value.target_types
+  });
+}
+
 export async function loadOrganizationModel(
   vaultPath: string
 ): Promise<OrganizationModel> {
   const lifecyclePath = ".second-brain/model/lifecycle.md";
   const noteTypePath = ".second-brain/model/types/note.md";
   const inboxPath = ".second-brain/model/views/inbox.md";
-  const [lifecycleSource, noteTypeSource, inboxSource, typeDocuments, viewDocuments] =
-    await Promise.all([
+  const [
+    lifecycleSource,
+    noteTypeSource,
+    inboxSource,
+    typeDocuments,
+    viewDocuments,
+    relationshipDocuments
+  ] = await Promise.all([
     readFile(join(vaultPath, lifecyclePath), "utf8"),
     readFile(join(vaultPath, noteTypePath), "utf8"),
     readFile(join(vaultPath, inboxPath), "utf8"),
     modelDocuments(vaultPath, "types"),
-    modelDocuments(vaultPath, "views")
+    modelDocuments(vaultPath, "views"),
+    modelDocuments(vaultPath, "relationships")
   ]);
   const lifecycle = lifecycleSchema.parse(
     frontmatter(lifecycleSource, lifecyclePath)
@@ -204,6 +242,9 @@ export async function loadOrganizationModel(
   const customViews = viewDocuments
     .filter(({ path }) => path !== inboxPath)
     .map(({ path, value }) => publicView(viewFileSchema.parse(value), path));
+  const relationships = relationshipDocuments.map(({ path, value }) =>
+    publicRelationship(relationshipFileSchema.parse(value), path)
+  );
   for (const type of types) {
     if (type.defaultState && !states.has(type.defaultState)) {
       throw new Error(
@@ -226,15 +267,29 @@ export async function loadOrganizationModel(
   };
   const views = [inboxView, ...customViews];
   const typeByKey = new Map(types.map((type) => [type.key, type]));
+  for (const relationship of relationships) {
+    for (const targetType of relationship.targetTypes) {
+      if (!typeByKey.has(targetType)) {
+        throw new Error(
+          `Relationship '${relationship.key}' has unknown advisory target Type '${targetType}'`
+        );
+      }
+    }
+  }
   const viewByKey = new Map(views.map((view) => [view.key, view]));
+  const relationshipByKey = new Map(
+    relationships.map((relationship) => [relationship.key, relationship])
+  );
   return {
     states,
     standaloneCreationState: noteType.default_state,
     inboxState: inbox.state,
     archivedState: lifecycle.archived_state,
     types,
+    relationships,
     views,
     type: (key) => typeByKey.get(key),
+    relationship: (key) => relationshipByKey.get(key),
     view: (key) => viewByKey.get(key)
   };
 }
