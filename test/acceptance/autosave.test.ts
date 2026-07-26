@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 
 import {
+  AutosaveConflictError,
   createAutosaveController,
   type AutosaveClock
 } from "../../src/web/autosave.js";
@@ -190,6 +191,124 @@ describe("autosave policy", () => {
       },
       keepalive: false
     });
+    expect(autosave.isDirty()).toBe(false);
+  });
+
+  test("identifies whether a completion published the current draft", async () => {
+    const clock = new FakeClock();
+    const finishSaves: Array<
+      (value: { revision: string; canonical: string }) => void
+    > = [];
+    const save = vi.fn(
+      () =>
+        new Promise<{ revision: string; canonical: string }>((resolve) => {
+          finishSaves.push(resolve);
+        })
+    );
+    const saved = vi.fn();
+    const autosave = createAutosaveController({
+      clock,
+      initialRevision: "a".repeat(64),
+      policy: { debounceMs: 1_500, maxDirtyMs: 10_000 },
+      save,
+      saved
+    });
+    const publishedDraft = {
+      format: "rich" as const,
+      bodyMarkdown: "Published snapshot"
+    };
+
+    autosave.change(publishedDraft);
+    const flushing = autosave.flush();
+    autosave.change({
+      format: "rich",
+      bodyMarkdown: "Newer local draft"
+    });
+    finishSaves[0]?.({
+      revision: "b".repeat(64),
+      canonical: "Published snapshot"
+    });
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+
+    expect(saved).toHaveBeenCalledWith({
+      draft: publishedDraft,
+      isCurrent: false,
+      result: {
+        revision: "b".repeat(64),
+        canonical: "Published snapshot"
+      }
+    });
+
+    finishSaves[1]?.({
+      revision: "c".repeat(64),
+      canonical: "Newer local draft"
+    });
+    await flushing;
+    expect(saved).toHaveBeenLastCalledWith({
+      draft: {
+        format: "rich",
+        bodyMarkdown: "Newer local draft"
+      },
+      isCurrent: true,
+      result: {
+        revision: "c".repeat(64),
+        canonical: "Newer local draft"
+      }
+    });
+  });
+
+  test("pauses after a stale save and retains later edits until explicit resolution", async () => {
+    const clock = new FakeClock();
+    let pausedWhenReported = false;
+    const save = vi
+      .fn()
+      .mockRejectedValueOnce(new AutosaveConflictError("b".repeat(64)))
+      .mockResolvedValueOnce({ revision: "c".repeat(64) });
+    let autosave: ReturnType<typeof createAutosaveController>;
+    autosave = createAutosaveController({
+      clock,
+      initialRevision: "a".repeat(64),
+      policy: { debounceMs: 1_500, maxDirtyMs: 10_000 },
+      save,
+      conflicted() {
+        pausedWhenReported = autosave.isPaused();
+      }
+    });
+
+    autosave.change({
+      format: "rich",
+      bodyMarkdown: "Draft that became stale"
+    });
+    await expect(autosave.flush()).rejects.toBeInstanceOf(
+      AutosaveConflictError
+    );
+    expect(autosave.isPaused()).toBe(true);
+    expect(pausedWhenReported).toBe(true);
+    expect(autosave.isDirty()).toBe(true);
+
+    autosave.change({
+      format: "rich",
+      bodyMarkdown: "Complete draft after the conflict"
+    });
+    clock.advanceBy(10_000);
+    await Promise.resolve();
+    expect(save).toHaveBeenCalledOnce();
+
+    autosave.resolveConflict({
+      currentRevision: "b".repeat(64),
+      keepDraft: true
+    });
+    await autosave.flush();
+
+    expect(save).toHaveBeenNthCalledWith(2, {
+      baseRevision: "b".repeat(64),
+      draft: {
+        format: "rich",
+        bodyMarkdown: "Complete draft after the conflict"
+      },
+      keepalive: false
+    });
+    expect(autosave.isPaused()).toBe(false);
     expect(autosave.isDirty()).toBe(false);
   });
 });

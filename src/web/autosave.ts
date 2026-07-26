@@ -32,24 +32,45 @@ type SaveInput = {
   keepalive: boolean;
 };
 
-type AutosaveOptions = {
+type AutosaveOptions<Saved extends { revision: string }> = {
   clock: AutosaveClock;
   initialRevision: string | null;
   policy: {
     debounceMs: number;
     maxDirtyMs: number;
   };
-  save(input: SaveInput): Promise<{ revision: string }>;
+  save(input: SaveInput): Promise<Saved>;
+  saved?(event: {
+    draft: AutosaveDraft;
+    isCurrent: boolean;
+    result: Saved;
+  }): void;
+  conflicted?(event: {
+    draft: AutosaveDraft;
+    error: AutosaveConflictError;
+  }): void;
 };
+
+export class AutosaveConflictError extends Error {
+  constructor(readonly currentRevision: string) {
+    super("Newer canonical content requires resolution.");
+    this.name = "AutosaveConflictError";
+  }
+}
 
 export type AutosaveController = {
   change(draft: AutosaveDraft): void;
   flush(options?: { keepalive?: boolean }): Promise<void>;
   isDirty(): boolean;
+  isPaused(): boolean;
+  resolveConflict(options: {
+    currentRevision: string;
+    keepDraft: boolean;
+  }): void;
 };
 
-export function createAutosaveController(
-  options: AutosaveOptions
+export function createAutosaveController<Saved extends { revision: string }>(
+  options: AutosaveOptions<Saved>
 ): AutosaveController {
   let draft: AutosaveDraft | undefined;
   let debounceTimer: unknown;
@@ -58,6 +79,7 @@ export function createAutosaveController(
   let revision = options.initialRevision;
   let changeVersion = 0;
   let inFlight: Promise<void> | undefined;
+  let pausedConflict: AutosaveConflictError | undefined;
 
   const clearDebounce = () => {
     if (debounceTimer !== undefined) {
@@ -80,18 +102,39 @@ export function createAutosaveController(
     if (!draft) {
       return;
     }
-    const result = await options.save({
-      baseRevision: revision,
-      draft,
-      keepalive
-    });
+    const publishedDraft = draft;
+    let result: Saved;
+    try {
+      result = await options.save({
+        baseRevision: revision,
+        draft: publishedDraft,
+        keepalive
+      });
+    } catch (reason) {
+      if (reason instanceof AutosaveConflictError) {
+        pausedConflict = reason;
+        options.conflicted?.({
+          draft: publishedDraft,
+          error: reason
+        });
+      }
+      throw reason;
+    }
     revision = result.revision;
     dirty = changeVersion !== savingVersion;
+    options.saved?.({
+      draft: publishedDraft,
+      isCurrent: !dirty,
+      result
+    });
   };
 
   const flush = async (
     flushOptions: { keepalive?: boolean } = {}
   ): Promise<void> => {
+    if (pausedConflict) {
+      throw pausedConflict;
+    }
     while (dirty || inFlight) {
       if (inFlight) {
         await inFlight;
@@ -113,12 +156,17 @@ export function createAutosaveController(
     change(nextDraft) {
       draft = nextDraft;
       changeVersion += 1;
+      dirty = true;
+      if (pausedConflict) {
+        clearDebounce();
+        clearMaxDirty();
+        return;
+      }
       if (maxDirtyTimer === undefined) {
         maxDirtyTimer = options.clock.setTimeout(() => {
           void flush().catch(() => undefined);
         }, options.policy.maxDirtyMs);
       }
-      dirty = true;
       clearDebounce();
       debounceTimer = options.clock.setTimeout(() => {
         void flush().catch(() => undefined);
@@ -127,6 +175,21 @@ export function createAutosaveController(
     flush,
     isDirty() {
       return dirty;
+    },
+    isPaused() {
+      return pausedConflict !== undefined;
+    },
+    resolveConflict({ currentRevision, keepDraft }) {
+      clearDebounce();
+      clearMaxDirty();
+      revision = currentRevision;
+      pausedConflict = undefined;
+      if (!keepDraft) {
+        draft = undefined;
+        dirty = false;
+      } else {
+        dirty = draft !== undefined;
+      }
     }
   };
 }

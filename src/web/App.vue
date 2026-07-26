@@ -31,13 +31,22 @@ import RawMarkdownEditor from "./RawMarkdownEditor.vue";
 import RichMarkdownEditor from "./RichMarkdownEditor.vue";
 import {
   type AutosaveController,
+  AutosaveConflictError,
   type AutosaveDraft,
   createAutosaveController,
   systemAutosaveClock
 } from "./autosave";
+import ContentConflictDialog from "./ContentConflictDialog.vue";
+import { useContentConflict } from "./content-conflict";
 import { isRichMarkdownRoundTripSafe } from "./foundation-markdown";
 
-type SaveStatus = "ready" | "dirty" | "saving" | "saved" | "error";
+type SaveStatus =
+  | "ready"
+  | "dirty"
+  | "saving"
+  | "saved"
+  | "conflict"
+  | "error";
 type EditorMode = "rich" | "raw" | "protected";
 
 const routeMatch = window.location.pathname.match(
@@ -111,8 +120,57 @@ const statusLabel = computed(() => {
       return "Saved";
     case "error":
       return "Not saved";
+    case "conflict":
+      return "Needs review";
     default:
       return note.value?.exists ? "Saved" : "Not created";
+  }
+});
+
+const {
+  adoptCurrentContent,
+  closeContentConflict,
+  combineContentManually,
+  contentConflict,
+  openContentConflict,
+  retryContentConflict,
+  reviewContentConflict,
+  saveDraftAgainstCurrent
+} = useContentConflict<DailyNoteResponse>({
+  getAutosave: () => autosave.value,
+  async loadCurrent() {
+    if (!note.value) {
+      throw new Error("No Daily Note is open.");
+    }
+    const response = await fetch(`/api/v1/daily/${note.value.date}`, {
+      cache: "no-store"
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Current saved content could not be loaded (${response.status})`
+      );
+    }
+    return dailyNoteResponseSchema.parse(await response.json());
+  },
+  revision: (current) =>
+    current.sourceMarkdown === null ? null : current.revision,
+  applyCurrent(current) {
+    note.value = current;
+    rawDraft.value = current.sourceMarkdown ?? "";
+    richEditorSafe.value = isRichMarkdownRoundTripSafe(current.bodyMarkdown);
+    editorMode.value =
+      editorMode.value === "raw"
+        ? "raw"
+        : richEditorSafe.value
+          ? "rich"
+          : "protected";
+    void refreshConnections(current.id);
+  },
+  setSaveError: (message) => {
+    saveError.value = message;
+  },
+  setSaveStatus: (status) => {
+    saveStatus.value = status;
   }
 });
 
@@ -140,39 +198,50 @@ function configureAutosave(currentNote: DailyNoteResponse): void {
         });
         if (!response.ok) {
           const detail = (await response.json().catch(() => undefined)) as
-            | { error?: string; message?: string }
+            | {
+                error?: string;
+                message?: string;
+                currentRevision?: string | null;
+              }
             | undefined;
+          if (
+            detail?.error === "stale_revision" &&
+            typeof detail.currentRevision === "string"
+          ) {
+            throw new AutosaveConflictError(detail.currentRevision);
+          }
           throw new Error(
-            detail?.error === "stale_revision"
-              ? "This Daily Note changed elsewhere. Reload before saving again."
-              : (detail?.message ?? `Save failed (${response.status})`)
+            detail?.message ?? `Save failed (${response.status})`
           );
         }
         const saved = dailyNoteResponseSchema.parse(await response.json());
-        if (draft.format === "rich") {
-          note.value = {
-            ...saved,
-            bodyMarkdown: note.value?.bodyMarkdown ?? saved.bodyMarkdown
-          };
-        } else if (draft.format === "raw") {
-          note.value = saved;
-          if (rawDraft.value === draft.sourceMarkdown) {
-            rawDraft.value = saved.sourceMarkdown!;
-          }
-        } else if (draft.format === "document") {
-          note.value = saved;
+        if (!saved.revision) {
+          throw new Error("Saved Daily Note has no revision.");
         }
-        richEditorSafe.value = isRichMarkdownRoundTripSafe(
-          saved.bodyMarkdown
-        );
-        await refreshConnections(saved.id);
-        saveStatus.value = "saved";
-        return { revision: saved.revision! };
+        return { ...saved, revision: saved.revision };
       } catch (reason) {
-        saveStatus.value = "error";
-        saveError.value = explainError(reason, "This Daily Note was not saved.");
+        saveStatus.value =
+          reason instanceof AutosaveConflictError ? "conflict" : "error";
+        saveError.value =
+          reason instanceof AutosaveConflictError
+            ? undefined
+            : explainError(reason, "This Daily Note was not saved.");
         throw reason;
       }
+    },
+    saved({ isCurrent, result: saved }) {
+      if (!isCurrent) {
+        saveStatus.value = "dirty";
+        return;
+      }
+      note.value = saved;
+      rawDraft.value = saved.sourceMarkdown ?? "";
+      richEditorSafe.value = isRichMarkdownRoundTripSafe(saved.bodyMarkdown);
+      saveStatus.value = "saved";
+      void refreshConnections(saved.id);
+    },
+    conflicted({ error }) {
+      void openContentConflict(error.currentRevision);
     }
   });
 }
@@ -241,9 +310,11 @@ function markDraftDirty(draft: AutosaveDraft): void {
   if (!note.value || !autosave.value) {
     return;
   }
-  saveStatus.value = "dirty";
-  saveError.value = undefined;
   autosave.value.change(draft);
+  saveStatus.value = autosave.value.isPaused() ? "conflict" : "dirty";
+  if (!autosave.value.isPaused()) {
+    saveError.value = undefined;
+  }
 }
 
 function updateBody(bodyMarkdown: string): void {
@@ -567,6 +638,21 @@ onBeforeUnmount(() => {
       </div>
 
       <section v-else-if="note" class="document">
+        <ContentConflictDialog
+          v-if="contentConflict"
+          :current-source="contentConflict.current?.sourceMarkdown ?? undefined"
+          :load-error="contentConflict.loadError"
+          :loading="contentConflict.loading"
+          :manual="contentConflict.manual"
+          :open="contentConflict.open"
+          @adopt="adoptCurrentContent"
+          @close="closeContentConflict"
+          @manual="combineContentManually"
+          @replace="saveDraftAgainstCurrent"
+          @retry="retryContentConflict"
+          @review="reviewContentConflict"
+          @save-manual="saveDraftAgainstCurrent"
+        />
         <p class="document-date">{{ longDate }}</p>
         <h1>{{ displayTitle }}</h1>
         <div class="writing-rule" aria-hidden="true"></div>

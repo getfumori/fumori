@@ -857,6 +857,193 @@ target_types: [note]
   }
 });
 
+test("two tabs resolve stale Human Note drafts without silent overwrite", async ({
+  browser
+}) => {
+  test.setTimeout(240_000);
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "fumori-conflict-e2e-"));
+  let server: ChildProcess | undefined;
+
+  try {
+    const fumori = await packAndInstall(temporaryRoot);
+    const vault = join(temporaryRoot, "vault");
+    await execFileAsync("git", ["init", "--quiet", vault]);
+    await execFileAsync(fumori, ["vault", "bootstrap", "--path", vault], {
+      cwd: temporaryRoot
+    });
+    server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
+      cwd: temporaryRoot,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const url = await waitForFumoriServer(server, {
+      label: "Packed conflict Fumori server",
+      timeoutMs: 20_000
+    });
+    const created = (await (
+      await fetch(`${url}/api/v1/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ context: "global" })
+      })
+    ).json()) as { id: string };
+    const noteUrl = `${url}/notes/${created.id}`;
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 }
+    });
+    const firstTab = await context.newPage();
+    const secondTab = await context.newPage();
+    await Promise.all([firstTab.goto(noteUrl), secondTab.goto(noteUrl)]);
+    const rawEditor = (page: typeof firstTab) =>
+      page.getByRole("textbox", { name: "Raw Markdown editor" });
+    const openRawEditor = async (page: typeof firstTab) => {
+      await page.getByRole("button", { name: "Raw Markdown" }).click();
+      await expect(rawEditor(page)).toBeVisible();
+    };
+    await Promise.all([openRawEditor(firstTab), openRawEditor(secondTab)]);
+    const initialSource = await rawEditor(firstTab).inputValue();
+    let failNextCurrentLoad = true;
+    await secondTab.route(`**/api/v1/notes/${created.id}`, async (route) => {
+      if (failNextCurrentLoad && route.request().method() === "GET") {
+        failNextCurrentLoad = false;
+        await route.fulfill({ status: 503, body: "temporarily unavailable" });
+        return;
+      }
+      await route.continue();
+    });
+    const withBody = (source: string, body: string) => {
+      const envelope = source.match(/^---\n[\s\S]*?\n---\n/)?.[0];
+      if (!envelope) {
+        throw new Error("Human Note source has no canonical envelope");
+      }
+      return `${envelope}\n# Shared Note\n\n${body}\n`;
+    };
+    const saveSource = async (page: typeof firstTab, source: string) => {
+      await rawEditor(page).fill(source);
+      await page.keyboard.press("Control+s");
+      await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+    };
+    const canonicalPath = async () => {
+      const current = (await (
+        await fetch(`${url}/api/v1/notes/${created.id}`, {
+          cache: "no-store"
+        })
+      ).json()) as { canonicalPath: string };
+      return join(vault, current.canonicalPath);
+    };
+
+    const currentToAdopt = withBody(
+      initialSource,
+      "Current content to adopt."
+    );
+    await saveSource(firstTab, currentToAdopt);
+    const notePath = await canonicalPath();
+    const localDraft = withBody(
+      initialSource,
+      "Local draft that must survive."
+    );
+    await rawEditor(secondTab).fill(localDraft);
+    await secondTab.keyboard.press("Control+s");
+    const adoptDialog = secondTab.getByRole("dialog", {
+      name: "Resolve newer content"
+    });
+    await expect(adoptDialog).toBeVisible();
+    await expect(rawEditor(secondTab)).toHaveValue(localDraft);
+    expect(await readFile(notePath, "utf8")).toBe(currentToAdopt);
+    await adoptDialog
+      .getByRole("button", { name: "Retry loading current content" })
+      .click();
+    await expect(
+      adoptDialog.getByRole("textbox", { name: "Current saved content" })
+    ).toHaveValue(currentToAdopt);
+    await expect(adoptDialog).not.toContainText(/\b(?:Git|branch|merge)\b/i);
+    await adoptDialog.getByRole("button", { name: "Close" }).click();
+    await expect(adoptDialog).not.toBeVisible();
+    const completeLocalDraft = withBody(
+      initialSource,
+      "Complete local draft after closing."
+    );
+    await rawEditor(secondTab).fill(completeLocalDraft);
+    await secondTab.waitForTimeout(1_800);
+    expect(await readFile(notePath, "utf8")).toBe(currentToAdopt);
+    await secondTab
+      .getByRole("button", { name: "Review newer content" })
+      .click();
+    await adoptDialog
+      .getByRole("button", { name: "Use current saved content" })
+      .click();
+    await expect(rawEditor(secondTab)).toHaveValue(currentToAdopt);
+    await secondTab.waitForTimeout(1_800);
+    expect(await readFile(notePath, "utf8")).toBe(currentToAdopt);
+
+    await Promise.all([firstTab.reload(), secondTab.reload()]);
+    await Promise.all([openRawEditor(firstTab), openRawEditor(secondTab)]);
+    const currentBeforeReplacement = withBody(
+      currentToAdopt,
+      "Current content before replacement."
+    );
+    await saveSource(firstTab, currentBeforeReplacement);
+    const replacementDraft = withBody(
+      currentToAdopt,
+      "Draft chosen as the replacement."
+    );
+    await rawEditor(secondTab).fill(replacementDraft);
+    await secondTab.keyboard.press("Control+s");
+    const replaceDialog = secondTab.getByRole("dialog", {
+      name: "Resolve newer content"
+    });
+    await expect(replaceDialog).toBeVisible();
+    await replaceDialog
+      .getByRole("button", { name: "Replace with my draft" })
+      .click();
+    await expect
+      .poll(() => readFile(notePath, "utf8"))
+      .toBe(replacementDraft);
+
+    await Promise.all([firstTab.reload(), secondTab.reload()]);
+    await Promise.all([openRawEditor(firstTab), openRawEditor(secondTab)]);
+    const currentBeforeManual = withBody(
+      replacementDraft,
+      "Current side of the manual combination."
+    );
+    await saveSource(firstTab, currentBeforeManual);
+    const manualDraft = withBody(
+      replacementDraft,
+      "Draft side of the manual combination."
+    );
+    await rawEditor(secondTab).fill(manualDraft);
+    await secondTab.keyboard.press("Control+s");
+    const manualDialog = secondTab.getByRole("dialog", {
+      name: "Resolve newer content"
+    });
+    await expect(manualDialog).toBeVisible();
+    await manualDialog
+      .getByRole("button", { name: "Combine manually" })
+      .click();
+    await expect(manualDialog).not.toBeVisible();
+    const combinedDraft = withBody(
+      replacementDraft,
+      [
+        "Current side of the manual combination.",
+        "",
+        "Draft side of the manual combination."
+      ].join("\n")
+    );
+    await rawEditor(secondTab).fill(combinedDraft);
+    await secondTab
+      .getByRole("button", { name: "Save combined draft" })
+      .click();
+    await expect
+      .poll(() => readFile(notePath, "utf8"))
+      .toBe(combinedDraft);
+    await context.close();
+  } finally {
+    if (server) {
+      await stopServer(server);
+    }
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("the packed CLI archives and deletes a linked Human Note through Chromium", async ({
   browser
 }) => {

@@ -44,13 +44,22 @@ import RawMarkdownEditor from "./RawMarkdownEditor.vue";
 import RichMarkdownEditor from "./RichMarkdownEditor.vue";
 import {
   type AutosaveController,
+  AutosaveConflictError,
   type AutosaveDraft,
   createAutosaveController,
   systemAutosaveClock
 } from "./autosave";
+import ContentConflictDialog from "./ContentConflictDialog.vue";
+import { useContentConflict } from "./content-conflict";
 import { isRichMarkdownRoundTripSafe } from "./foundation-markdown";
 
-type SaveStatus = "ready" | "dirty" | "saving" | "saved" | "error";
+type SaveStatus =
+  | "ready"
+  | "dirty"
+  | "saving"
+  | "saved"
+  | "conflict"
+  | "error";
 type EditorMode = "rich" | "raw" | "protected";
 type KnowledgeMode =
   | "notes"
@@ -155,8 +164,57 @@ const statusLabel = computed(() => {
       return "Saved";
     case "error":
       return "Not saved";
+    case "conflict":
+      return "Needs review";
     default:
       return "Saved";
+  }
+});
+
+const {
+  adoptCurrentContent,
+  closeContentConflict,
+  combineContentManually,
+  contentConflict,
+  openContentConflict,
+  retryContentConflict,
+  reviewContentConflict,
+  saveDraftAgainstCurrent
+} = useContentConflict<HumanNoteResponse>({
+  getAutosave: () => autosave.value,
+  async loadCurrent() {
+    if (!humanNote.value) {
+      throw new Error("No Human Note is open.");
+    }
+    const response = await fetch(`/api/v1/notes/${humanNote.value.id}`, {
+      cache: "no-store"
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Current saved content could not be loaded (${response.status})`
+      );
+    }
+    return humanNoteResponseSchema.parse(await response.json());
+  },
+  revision: (current) => current.revision,
+  applyCurrent(current) {
+    humanNote.value = current;
+    rawDraft.value = current.sourceMarkdown;
+    richEditorSafe.value = isRichMarkdownRoundTripSafe(current.bodyMarkdown);
+    editorMode.value =
+      editorMode.value === "raw"
+        ? "raw"
+        : richEditorSafe.value
+          ? "rich"
+          : "protected";
+    document.title = `${current.title} — Fumori`;
+    void refreshAfterSave(current.id);
+  },
+  setSaveError: (message) => {
+    saveError.value = message;
+  },
+  setSaveStatus: (status) => {
+    saveStatus.value = status;
   }
 });
 
@@ -184,48 +242,61 @@ function configureAutosave(currentNote: HumanNoteResponse): void {
         });
         if (!response.ok) {
           const detail = (await response.json().catch(() => undefined)) as
-            | { error?: string; message?: string }
+            | {
+                error?: string;
+                message?: string;
+                currentRevision?: string;
+              }
             | undefined;
-          throw new Error(
-            detail?.error === "stale_revision"
-              ? "This note changed elsewhere. Reload before saving again."
-              : (detail?.message ?? `Save failed (${response.status})`)
-          );
-        }
-        const saved = humanNoteResponseSchema.parse(await response.json());
-        if (draft.format === "rich") {
-          humanNote.value = {
-            ...saved,
-            bodyMarkdown: humanNote.value?.bodyMarkdown ?? saved.bodyMarkdown
-          };
-        } else if (draft.format === "raw") {
-          humanNote.value = saved;
-          if (rawDraft.value === draft.sourceMarkdown) {
-            rawDraft.value = saved.sourceMarkdown;
+          if (
+            detail?.error === "stale_revision" &&
+            typeof detail.currentRevision === "string"
+          ) {
+            throw new AutosaveConflictError(detail.currentRevision);
           }
-        } else if (draft.format === "document") {
-          humanNote.value = saved;
-        }
-        richEditorSafe.value = isRichMarkdownRoundTripSafe(saved.bodyMarkdown);
-        const listResponse = await fetch("/api/v1/notes", {
-          cache: "no-store"
-        });
-        if (listResponse.ok) {
-          noteList.value = humanNoteListResponseSchema.parse(
-            await listResponse.json()
+          throw new Error(
+            detail?.message ?? `Save failed (${response.status})`
           );
         }
-        document.title = `${saved.title} — Fumori`;
-        await refreshConnections(saved.id);
-        saveStatus.value = "saved";
-        return { revision: saved.revision };
+        return humanNoteResponseSchema.parse(await response.json());
       } catch (reason) {
-        saveStatus.value = "error";
-        saveError.value = explainError(reason, "This note was not saved.");
+        saveStatus.value =
+          reason instanceof AutosaveConflictError ? "conflict" : "error";
+        saveError.value =
+          reason instanceof AutosaveConflictError
+            ? undefined
+            : explainError(reason, "This note was not saved.");
         throw reason;
       }
+    },
+    saved({ isCurrent, result: saved }) {
+      if (!isCurrent) {
+        saveStatus.value = "dirty";
+        return;
+      }
+      humanNote.value = saved;
+      rawDraft.value = saved.sourceMarkdown;
+      richEditorSafe.value = isRichMarkdownRoundTripSafe(saved.bodyMarkdown);
+      document.title = `${saved.title} — Fumori`;
+      saveStatus.value = "saved";
+      void refreshAfterSave(saved.id);
+    },
+    conflicted({ error }) {
+      void openContentConflict(error.currentRevision);
     }
   });
+}
+
+async function refreshAfterSave(id: string): Promise<void> {
+  const [listResponse] = await Promise.all([
+    fetch("/api/v1/notes", { cache: "no-store" }),
+    refreshConnections(id)
+  ]);
+  if (listResponse.ok) {
+    noteList.value = humanNoteListResponseSchema.parse(
+      await listResponse.json()
+    );
+  }
 }
 
 async function refreshConnections(id: string): Promise<void> {
@@ -367,9 +438,11 @@ function markDraftDirty(draft: AutosaveDraft): void {
   if (!humanNote.value || !autosave.value) {
     return;
   }
-  saveStatus.value = "dirty";
-  saveError.value = undefined;
   autosave.value.change(draft);
+  saveStatus.value = autosave.value.isPaused() ? "conflict" : "dirty";
+  if (!autosave.value.isPaused()) {
+    saveError.value = undefined;
+  }
 }
 
 function updateBody(bodyMarkdown: string): void {
@@ -951,6 +1024,21 @@ onBeforeUnmount(() => {
       </div>
 
       <section v-else-if="humanNote" class="document human-document">
+        <ContentConflictDialog
+          v-if="contentConflict"
+          :current-source="contentConflict.current?.sourceMarkdown"
+          :load-error="contentConflict.loadError"
+          :loading="contentConflict.loading"
+          :manual="contentConflict.manual"
+          :open="contentConflict.open"
+          @adopt="adoptCurrentContent"
+          @close="closeContentConflict"
+          @manual="combineContentManually"
+          @replace="saveDraftAgainstCurrent"
+          @retry="retryContentConflict"
+          @review="reviewContentConflict"
+          @save-manual="saveDraftAgainstCurrent"
+        />
         <dialog
           :open="deletionImpact !== undefined"
           class="delete-note-dialog"
