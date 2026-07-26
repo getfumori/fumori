@@ -10,6 +10,7 @@ import { appConfigSchema } from "../contracts/app-config.js";
 import {
   dailyNoteResponseSchema,
   explicitCreationRequiredResponseSchema,
+  invalidCanonicalMarkdownResponseSchema,
   saveDailyNoteRequestSchema,
   staleDailyNoteResponseSchema
 } from "../contracts/daily-note.js";
@@ -17,6 +18,7 @@ import { todayResponseSchema } from "../contracts/today.js";
 import {
   DailyNotes,
   ExplicitDailyNoteCreationRequiredError,
+  InvalidDailyNoteMarkdownError,
   StaleDailyNoteRevisionError
 } from "../vault/daily-notes.js";
 import { openVault } from "../vault/open.js";
@@ -119,6 +121,16 @@ export async function startServer(
             error: "explicit_creation_required"
           }),
           409
+        );
+      }
+      if (error instanceof InvalidDailyNoteMarkdownError) {
+        context.header("Cache-Control", "no-store");
+        return context.json(
+          invalidCanonicalMarkdownResponseSchema.parse({
+            error: "invalid_canonical_markdown",
+            message: error.message
+          }),
+          422
         );
       }
       throw error;

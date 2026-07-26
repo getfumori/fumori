@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { Markdown } from "@tiptap/markdown";
-import { TaskItem, TaskList } from "@tiptap/extension-list";
-import StarterKit from "@tiptap/starter-kit";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
 import { watch } from "vue";
+
+import { createFoundationMarkdownExtensions } from "./foundation-markdown";
 
 const props = defineProps<{
   modelValue: string;
@@ -14,20 +13,7 @@ const emit = defineEmits<{
 }>();
 
 const editor = useEditor({
-  extensions: [
-    StarterKit.configure({
-      heading: { levels: [1, 2, 3] },
-      horizontalRule: false,
-      link: false,
-      strike: false,
-      underline: false
-    }),
-    TaskList,
-    TaskItem.configure({ nested: true }),
-    Markdown.configure({
-      markedOptions: { gfm: true }
-    })
-  ],
+  extensions: createFoundationMarkdownExtensions(),
   content: props.modelValue,
   contentType: "markdown",
   editorProps: {

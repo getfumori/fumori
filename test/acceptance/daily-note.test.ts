@@ -75,6 +75,7 @@ describe("Daily Notes HTTP contract", () => {
       exists: boolean;
       revision: string | null;
       bodyMarkdown: string;
+      sourceMarkdown: string;
     };
     const dailyPath = join(vault, "human", "daily", `${virtual.date}.md`);
 
@@ -82,7 +83,8 @@ describe("Daily Notes HTTP contract", () => {
       date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
       exists: false,
       revision: null,
-      bodyMarkdown: ""
+      bodyMarkdown: "",
+      sourceMarkdown: expect.stringContaining("# ")
     });
     await expect(readFile(dailyPath, "utf8")).rejects.toMatchObject({
       code: "ENOENT"
@@ -94,6 +96,7 @@ describe("Daily Notes HTTP contract", () => {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          format: "rich",
           baseRevision: null,
           bodyMarkdown: "A first thought."
         })
@@ -127,6 +130,68 @@ describe("Daily Notes HTTP contract", () => {
     expect(commits.trim()).toBe("1");
   });
 
+  test("a first Today edit can start in Raw Markdown", async () => {
+    const { url, vault } = await makeRunningVault();
+    const virtual = (await (
+      await fetch(`${url}/api/v1/today`)
+    ).json()) as {
+      date: string;
+      sourceMarkdown: string;
+    };
+    const dailyPath = join(vault, "human", "daily", `${virtual.date}.md`);
+    const sourceMarkdown = virtual.sourceMarkdown.replace(
+      `# ${virtual.date}\n`,
+      `# ${virtual.date}\n\n| Key | Value |\n| --- | --- |\n| seed | tree |\n`
+    );
+
+    const response = await fetch(`${url}/api/v1/daily/${virtual.date}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        format: "raw",
+        baseRevision: null,
+        sourceMarkdown
+      })
+    });
+
+    expect(response.status).toBe(200);
+    expect(await readFile(dailyPath, "utf8")).toBe(sourceMarkdown);
+  });
+
+  test("a first Raw Today edit cannot replace server-issued identity", async () => {
+    const { url, vault } = await makeRunningVault();
+    const virtual = (await (
+      await fetch(`${url}/api/v1/today`)
+    ).json()) as {
+      date: string;
+      sourceMarkdown: string;
+    };
+    const dailyPath = join(vault, "human", "daily", `${virtual.date}.md`);
+    const changedIdentity = virtual.sourceMarkdown.replace(
+      /^_id: .+$/m,
+      "_id: 11111111-1111-4111-8111-111111111111"
+    );
+
+    const response = await fetch(`${url}/api/v1/daily/${virtual.date}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        format: "raw",
+        baseRevision: null,
+        sourceMarkdown: changedIdentity
+      })
+    });
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_canonical_markdown",
+      message: "Reserved field '_id' cannot be changed."
+    });
+    await expect(readFile(dailyPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+  });
+
   test("a save replaces complete Markdown only at its base revision", async () => {
     const { url, vault } = await makeRunningVault();
     const virtual = (await (
@@ -139,6 +204,7 @@ describe("Daily Notes HTTP contract", () => {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          format: "rich",
           baseRevision: null,
           bodyMarkdown: "First version."
         })
@@ -165,6 +231,7 @@ describe("Daily Notes HTTP contract", () => {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          format: "rich",
           baseRevision: current.revision,
           bodyMarkdown: "Second **complete** version."
         })
@@ -194,6 +261,7 @@ describe("Daily Notes HTTP contract", () => {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          format: "rich",
           baseRevision: created.revision,
           bodyMarkdown: "Stale overwrite."
         })
@@ -232,6 +300,7 @@ describe("Daily Notes HTTP contract", () => {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        format: "rich",
         baseRevision: null,
         bodyMarkdown: "This must not create the note."
       })
@@ -266,6 +335,7 @@ describe("Daily Notes HTTP contract", () => {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        format: "rich",
         baseRevision: created.revision,
         bodyMarkdown: "Explicitly opened history."
       })
@@ -274,5 +344,148 @@ describe("Daily Notes HTTP contract", () => {
     expect(await readFile(dailyPath, "utf8")).toContain(
       "# 2000-01-02\n\nExplicitly opened history.\n"
     );
+  });
+
+  test("a Raw Markdown save publishes exact canonical bytes", async () => {
+    const { url, vault } = await makeRunningVault();
+    const virtual = (await (
+      await fetch(`${url}/api/v1/today`)
+    ).json()) as { date: string };
+    const dailyPath = join(vault, "human", "daily", `${virtual.date}.md`);
+    const createResponse = await fetch(
+      `${url}/api/v1/daily/${virtual.date}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          format: "rich",
+          baseRevision: null,
+          bodyMarkdown: "A supported beginning."
+        })
+      }
+    );
+    const created = (await createResponse.json()) as {
+      revision: string;
+      sourceMarkdown: string;
+    };
+    const unsupportedBody = [
+      "A supported beginning.",
+      "",
+      "| Key | Value |",
+      "| --- | --- |",
+      "| mist | high |",
+      "",
+      "$$",
+      "x^2 + y^2",
+      "$$",
+      "",
+      "```mermaid",
+      "graph TD",
+      "  seed --> forest",
+      "```",
+      "",
+      "<section data-kind=\"weather\">Fog</section>"
+    ].join("\n");
+    const sourceMarkdown = created.sourceMarkdown
+      .replace("state: organized", "state: captured")
+      .replace("aliases: []", "aliases: []\nweather: foggy")
+      .replace("A supported beginning.", unsupportedBody);
+
+    const response = await fetch(`${url}/api/v1/daily/${virtual.date}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        format: "raw",
+        baseRevision: created.revision,
+        sourceMarkdown
+      })
+    });
+
+    expect(response.status).toBe(200);
+    const saved = (await response.json()) as {
+      revision: string;
+      sourceMarkdown: string;
+    };
+    expect(saved.sourceMarkdown).toBe(sourceMarkdown);
+    expect(await readFile(dailyPath, "utf8")).toBe(sourceMarkdown);
+    expect(saved.revision).toBe(
+      createHash("sha256").update(sourceMarkdown).digest("hex")
+    );
+  });
+
+  test("a Raw Markdown save rejects changed reserved metadata", async () => {
+    const { url, vault } = await makeRunningVault();
+    const virtual = (await (
+      await fetch(`${url}/api/v1/today`)
+    ).json()) as { date: string };
+    const dailyPath = join(vault, "human", "daily", `${virtual.date}.md`);
+    const createResponse = await fetch(
+      `${url}/api/v1/daily/${virtual.date}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          format: "rich",
+          baseRevision: null,
+          bodyMarkdown: "Keep this canonical."
+        })
+      }
+    );
+    const created = (await createResponse.json()) as {
+      revision: string;
+      sourceMarkdown: string;
+    };
+    const changedIdentity = created.sourceMarkdown.replace(
+      /^_id: .+$/m,
+      "_id: 11111111-1111-4111-8111-111111111111"
+    );
+
+    const response = await fetch(`${url}/api/v1/daily/${virtual.date}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        format: "raw",
+        baseRevision: created.revision,
+        sourceMarkdown: changedIdentity
+      })
+    });
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_canonical_markdown",
+      message: "Reserved field '_id' cannot be changed."
+    });
+    expect(await readFile(dailyPath, "utf8")).toBe(created.sourceMarkdown);
+  });
+
+  test("a Raw Markdown save rejects malformed ordinary frontmatter", async () => {
+    const { url, vault } = await makeRunningVault();
+    const virtual = (await (
+      await fetch(`${url}/api/v1/today`)
+    ).json()) as { date: string; sourceMarkdown: string };
+    const dailyPath = join(vault, "human", "daily", `${virtual.date}.md`);
+    const malformedSource = virtual.sourceMarkdown.replace(
+      "aliases: []",
+      "aliases: []\nweather: ["
+    );
+
+    const response = await fetch(`${url}/api/v1/daily/${virtual.date}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        format: "raw",
+        baseRevision: null,
+        sourceMarkdown: malformedSource
+      })
+    });
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "invalid_canonical_markdown",
+      message: expect.stringContaining("frontmatter")
+    });
+    await expect(readFile(dailyPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT"
+    });
   });
 });

@@ -52,9 +52,12 @@ describe("autosave policy", () => {
       save
     });
 
-    autosave.change("First");
+    autosave.change({ format: "rich", bodyMarkdown: "First" });
     clock.advanceBy(1_000);
-    autosave.change("First and second");
+    autosave.change({
+      format: "rich",
+      bodyMarkdown: "First and second"
+    });
     clock.advanceBy(1_499);
     expect(save).not.toHaveBeenCalled();
 
@@ -63,7 +66,10 @@ describe("autosave policy", () => {
     expect(save).toHaveBeenCalledOnce();
     expect(save).toHaveBeenCalledWith({
       baseRevision: null,
-      bodyMarkdown: "First and second",
+      draft: {
+        format: "rich",
+        bodyMarkdown: "First and second"
+      },
       keepalive: false
     });
   });
@@ -78,10 +84,13 @@ describe("autosave policy", () => {
       save
     });
 
-    autosave.change("Draft at 0");
+    autosave.change({ format: "rich", bodyMarkdown: "Draft at 0" });
     for (let second = 1; second <= 9; second += 1) {
       clock.advanceBy(1_000);
-      autosave.change(`Draft at ${second}`);
+      autosave.change({
+        format: "rich",
+        bodyMarkdown: `Draft at ${second}`
+      });
     }
     clock.advanceBy(999);
     expect(save).not.toHaveBeenCalled();
@@ -91,7 +100,10 @@ describe("autosave policy", () => {
     expect(save).toHaveBeenCalledOnce();
     expect(save).toHaveBeenCalledWith({
       baseRevision: "a".repeat(64),
-      bodyMarkdown: "Draft at 9",
+      draft: {
+        format: "rich",
+        bodyMarkdown: "Draft at 9"
+      },
       keepalive: false
     });
   });
@@ -107,20 +119,32 @@ describe("autosave policy", () => {
       save
     });
 
-    autosave.change("Before navigation");
+    autosave.change({
+      format: "rich",
+      bodyMarkdown: "Before navigation"
+    });
     await autosave.flush();
     expect(save).toHaveBeenNthCalledWith(1, {
       baseRevision: "a".repeat(64),
-      bodyMarkdown: "Before navigation",
+      draft: {
+        format: "rich",
+        bodyMarkdown: "Before navigation"
+      },
       keepalive: false
     });
     expect(autosave.isDirty()).toBe(false);
 
-    autosave.change("Before page exit");
+    autosave.change({
+      format: "raw",
+      sourceMarkdown: "Before page exit"
+    });
     await autosave.flush({ keepalive: true });
     expect(save).toHaveBeenNthCalledWith(2, {
       baseRevision: "b".repeat(64),
-      bodyMarkdown: "Before page exit",
+      draft: {
+        format: "raw",
+        sourceMarkdown: "Before page exit"
+      },
       keepalive: true
     });
     expect(autosave.isDirty()).toBe(false);
@@ -145,16 +169,25 @@ describe("autosave policy", () => {
       save
     });
 
-    autosave.change("First snapshot");
+    autosave.change({
+      format: "rich",
+      bodyMarkdown: "First snapshot"
+    });
     const flushing = autosave.flush();
-    autosave.change("Edit during save");
+    autosave.change({
+      format: "rich",
+      bodyMarkdown: "Edit during save"
+    });
     finishFirstSave?.({ revision: "a".repeat(64) });
     await flushing;
 
     expect(save).toHaveBeenCalledTimes(2);
     expect(save).toHaveBeenNthCalledWith(2, {
       baseRevision: "a".repeat(64),
-      bodyMarkdown: "Edit during save",
+      draft: {
+        format: "rich",
+        bodyMarkdown: "Edit during save"
+      },
       keepalive: false
     });
     expect(autosave.isDirty()).toBe(false);

@@ -443,6 +443,33 @@ kbd {
   background: #789581;
 }
 
+.document-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.editor-mode-button {
+  padding: 6px 10px;
+  border: 1px solid #d6d9d2;
+  border-radius: 7px;
+  color: var(--forest-700);
+  background: rgba(255, 255, 255, 0.65);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.editor-mode-button:hover {
+  border-color: #b5c0b7;
+  background: var(--ivory-100);
+}
+
+.editor-mode-button:focus-visible {
+  outline: 2px solid #789581;
+  outline-offset: 2px;
+}
+
 .more-button {
   display: flex;
   align-items: center;
@@ -793,8 +820,121 @@ kbd {
   pointer-events: none;
 }
 
+.rich-editor [data-opaque-markdown] {
+  margin: 1.2em 0;
+  padding: 15px 17px;
+  border: 1px solid #d7d9d2;
+  border-radius: 9px;
+  color: #526159;
+  background: #f0eee7;
+}
+
+.rich-editor [data-opaque-markdown] strong {
+  display: block;
+  margin-bottom: 9px;
+  color: #607367;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rich-editor [data-opaque-markdown] pre {
+  margin: 0;
+  padding: 0;
+  color: #526159;
+  background: transparent;
+  white-space: pre-wrap;
+}
+
+.rich-editor [data-wikilink] {
+  padding: 0.08em 0.25em;
+  border-radius: 4px;
+  color: var(--forest-700);
+  background: #e4e9e2;
+}
+
+.protected-markdown {
+  margin-top: 42px;
+  padding: 32px;
+  border: 1px solid #d8d9d1;
+  border-radius: 12px;
+  background: rgba(245, 243, 236, 0.74);
+}
+
+.protected-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  height: 32px;
+  margin-bottom: 22px;
+  border-radius: 7px;
+  color: #596b60;
+  background: #e4e9e2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.protected-markdown h2 {
+  margin: 8px 0 12px;
+  color: var(--forest-950);
+  font-family: ui-serif, Georgia, serif;
+  font-size: 28px;
+  font-weight: 500;
+}
+
+.protected-markdown > p:last-child {
+  max-width: 540px;
+  margin: 0;
+  color: #65716a;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.raw-editor {
+  margin-top: 42px;
+}
+
+.raw-editor-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 12px;
+  color: #66736c;
+  font-size: 11px;
+}
+
+.raw-editor-heading strong {
+  color: var(--forest-800);
+  font-size: 12px;
+}
+
+.raw-editor textarea {
+  display: block;
+  width: 100%;
+  min-height: 430px;
+  padding: 20px;
+  resize: vertical;
+  border: 1px solid #d8d9d1;
+  border-radius: 10px;
+  color: #34413b;
+  background: rgba(255, 255, 255, 0.64);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  tab-size: 2;
+}
+
+.raw-editor textarea:focus {
+  border-color: #9cad9f;
+  outline: 2px solid rgba(120, 149, 129, 0.18);
+  outline-offset: 1px;
+}
+
 .save-error {
-  margin: -58px 4px 28px;
+  margin: 18px 4px 28px;
   color: #985f55;
   font-size: 11px;
 }

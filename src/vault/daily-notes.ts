@@ -7,9 +7,11 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 
+import { parseDocument } from "yaml";
 import { z } from "zod";
 
 import { dailyNoteDateSchema } from "../contracts/daily-note-date.js";
+import type { SaveDailyNoteRequest } from "../contracts/daily-note.js";
 
 type DailyNoteMetadata = {
   id: string;
@@ -23,6 +25,7 @@ export type DailyNoteSnapshot = {
   exists: boolean;
   revision: string | null;
   bodyMarkdown: string;
+  sourceMarkdown: string | null;
 };
 
 export class StaleDailyNoteRevisionError extends Error {
@@ -37,6 +40,8 @@ export class ExplicitDailyNoteCreationRequiredError extends Error {
   }
 }
 
+export class InvalidDailyNoteMarkdownError extends Error {}
+
 function isMissingFile(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -49,8 +54,24 @@ function workingRevision(source: string): string {
   return createHash("sha256").update(source).digest("hex");
 }
 
-function manifestValue(source: string, key: string): string | undefined {
-  return source.match(new RegExp(`^${key}: (.+)$`, "m"))?.[1];
+function createDailyNoteMetadata(date: string): DailyNoteMetadata {
+  return {
+    id: randomUUID(),
+    created: new Date().toISOString(),
+    date
+  };
+}
+
+function reservedValue(frontmatter: string, key: string): string {
+  const values = [
+    ...frontmatter.matchAll(new RegExp(`^${key}:\\s*(.+?)\\s*$`, "gm"))
+  ];
+  if (values.length !== 1) {
+    throw new InvalidDailyNoteMarkdownError(
+      `Reserved field '${key}' must appear exactly once.`
+    );
+  }
+  return values[0]![1]!;
 }
 
 function decodeDailyNote(
@@ -60,28 +81,68 @@ function decodeDailyNote(
   const bodyMarker = "\n---\n\n";
   const bodyStart = source.indexOf(bodyMarker);
   const requiredHeading = `# ${expectedDate}\n`;
-  if (bodyStart < 0) {
-    throw new Error(`Daily Note ${expectedDate} has invalid frontmatter`);
+  if (!source.startsWith("---\n") || bodyStart < 0) {
+    throw new InvalidDailyNoteMarkdownError(
+      "Canonical Markdown must begin with YAML frontmatter."
+    );
   }
   const content = source.slice(bodyStart + bodyMarker.length);
   if (!content.startsWith(requiredHeading)) {
-    throw new Error(`Daily Note ${expectedDate} is missing its date H1`);
+    throw new InvalidDailyNoteMarkdownError(
+      `Canonical Markdown must retain the '# ${expectedDate}' date heading.`
+    );
   }
 
-  const requiredMetadata = z
-    .object({
-      id: z.uuid(),
-      created: z.string().min(1),
-      date: z.literal(expectedDate)
-    })
-    .parse({
-      id: manifestValue(source, "_id"),
-      created: manifestValue(source, "_created"),
-      date: manifestValue(source, "date")
-    });
+  const frontmatter = source.slice(0, bodyStart + "\n---".length);
+  const frontmatterDocument = parseDocument(
+    source.slice("---\n".length, bodyStart),
+    { uniqueKeys: true }
+  );
+  if (frontmatterDocument.errors.length > 0) {
+    throw new InvalidDailyNoteMarkdownError(
+      `Invalid frontmatter: ${frontmatterDocument.errors[0]!.message}`
+    );
+  }
+  const parsedFrontmatter = frontmatterDocument.toJS();
+  if (
+    typeof parsedFrontmatter !== "object" ||
+    parsedFrontmatter === null ||
+    Array.isArray(parsedFrontmatter)
+  ) {
+    throw new InvalidDailyNoteMarkdownError(
+      "Invalid frontmatter: expected a YAML mapping."
+    );
+  }
+  const id = reservedValue(frontmatter, "_id");
+  const created = reservedValue(frontmatter, "_created");
+  if (!z.uuid().safeParse(id).success) {
+    throw new InvalidDailyNoteMarkdownError(
+      "Reserved field '_id' must be a UUID."
+    );
+  }
+  if (!z.iso.datetime({ offset: true }).safeParse(created).success) {
+    throw new InvalidDailyNoteMarkdownError(
+      "Reserved field '_created' must be an ISO 8601 timestamp."
+    );
+  }
+  const expectedValues = {
+    _schema: "fumori.daily-note",
+    _version: "1",
+    type: "daily-note",
+    date: expectedDate
+  };
+  for (const [key, expectedValue] of Object.entries(expectedValues)) {
+    if (reservedValue(frontmatter, key) !== expectedValue) {
+      throw new InvalidDailyNoteMarkdownError(
+        `Reserved field '${key}' must be '${expectedValue}'.`
+      );
+    }
+  }
   const metadata: DailyNoteMetadata = {
-    ...requiredMetadata,
-    frontmatter: source.slice(0, bodyStart + "\n---".length)
+    id,
+    created,
+    date: expectedDate,
+    frontmatter
   };
   let bodyMarkdown = content.slice(requiredHeading.length);
   if (bodyMarkdown.startsWith("\n")) {
@@ -136,6 +197,7 @@ export class DailyNotes {
   readonly #dailyDirectory: string;
   readonly #today: () => string;
   readonly #writeTails = new Map<string, Promise<void>>();
+  readonly #virtualMetadata = new Map<string, DailyNoteMetadata>();
 
   constructor(vaultPath: string, today: () => string) {
     this.#dailyDirectory = join(vaultPath, "human", "daily");
@@ -152,20 +214,31 @@ export class DailyNotes {
       throw error;
     });
     if (source === undefined) {
-      return { date, exists: false, revision: null, bodyMarkdown: "" };
+      const sourceMarkdown =
+        date === this.#today()
+          ? encodeDailyNote(this.#metadataForMissing(date), "")
+          : null;
+      return {
+        date,
+        exists: false,
+        revision: null,
+        bodyMarkdown: "",
+        sourceMarkdown
+      };
     }
     const decoded = decodeDailyNote(source, date);
     return {
       date,
       exists: true,
       revision: workingRevision(source),
-      bodyMarkdown: decoded.bodyMarkdown
+      bodyMarkdown: decoded.bodyMarkdown,
+      sourceMarkdown: source
     };
   }
 
   async save(
     dateInput: string,
-    input: { baseRevision: string | null; bodyMarkdown: string }
+    input: SaveDailyNoteRequest
   ): Promise<DailyNoteSnapshot> {
     const date = dailyNoteDateSchema.parse(dateInput);
     return this.#withWriteLock(date, async () => {
@@ -177,14 +250,36 @@ export class DailyNotes {
         throw new ExplicitDailyNoteCreationRequiredError();
       }
       const path = join(this.#dailyDirectory, `${date}.md`);
+      if (input.format === "raw") {
+        const submittedMetadata = decodeDailyNote(
+          input.sourceMarkdown,
+          date
+        ).metadata;
+        if (current.sourceMarkdown) {
+          const currentMetadata = decodeDailyNote(
+            current.sourceMarkdown,
+            date
+          ).metadata;
+          if (submittedMetadata.id !== currentMetadata.id) {
+            throw new InvalidDailyNoteMarkdownError(
+              "Reserved field '_id' cannot be changed."
+            );
+          }
+          if (submittedMetadata.created !== currentMetadata.created) {
+            throw new InvalidDailyNoteMarkdownError(
+              "Reserved field '_created' cannot be changed."
+            );
+          }
+        }
+        await atomicReplace(path, input.sourceMarkdown);
+        this.#virtualMetadata.delete(date);
+        return this.read(date);
+      }
       const metadata = current.exists
         ? decodeDailyNote(await readFile(path, "utf8"), date).metadata
-        : {
-            id: randomUUID(),
-            created: new Date().toISOString(),
-            date
-          };
+        : this.#metadataForMissing(date);
       await atomicReplace(path, encodeDailyNote(metadata, input.bodyMarkdown));
+      this.#virtualMetadata.delete(date);
       return this.read(date);
     });
   }
@@ -202,16 +297,23 @@ export class DailyNotes {
       await atomicReplace(
         path,
         encodeDailyNote(
-          {
-            id: randomUUID(),
-            created: new Date().toISOString(),
-            date
-          },
+          createDailyNoteMetadata(date),
           ""
         )
       );
+      this.#virtualMetadata.delete(date);
       return { created: true, note: await this.read(date) };
     });
+  }
+
+  #metadataForMissing(date: string): DailyNoteMetadata {
+    const existing = this.#virtualMetadata.get(date);
+    if (existing) {
+      return existing;
+    }
+    const created = createDailyNoteMetadata(date);
+    this.#virtualMetadata.set(date, created);
+    return created;
   }
 
   async #withWriteLock<T>(date: string, operation: () => Promise<T>): Promise<T> {

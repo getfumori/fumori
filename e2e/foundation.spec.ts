@@ -141,6 +141,29 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
       .getByTestId("rich-editor")
       .locator("[contenteditable='true']");
     await expect(editor).toBeVisible();
+    await page.getByRole("button", { name: "Raw Markdown" }).click();
+    const virtualRawEditor = page.getByRole("textbox", {
+      name: "Raw Markdown editor"
+    });
+    await expect(virtualRawEditor).toHaveValue(
+      new RegExp(`# ${todayPayload.date}\\n$`)
+    );
+    await page.getByRole("button", { name: "Rich editor" }).click();
+    await expect(editor).toBeVisible();
+    await expect(readFile(dailyPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+    await page.getByRole("button", { name: "Raw Markdown" }).click();
+    const firstRawSource = (await virtualRawEditor.inputValue()).replace(
+      `# ${todayPayload.date}\n`,
+      `# ${todayPayload.date}\n\nStarted in Raw Markdown.\n`
+    );
+    await virtualRawEditor.fill(firstRawSource);
+    await page.keyboard.press("Control+s");
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+    expect(await readFile(dailyPath, "utf8")).toBe(firstRawSource);
+    await page.getByRole("button", { name: "Rich editor" }).click();
+    await expect(editor).toContainText("Started in Raw Markdown.");
     await editor.fill("The first thought grows here.");
     await expect(page.getByText("Saved", { exact: true })).toBeVisible({
       timeout: 5_000
@@ -226,6 +249,15 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
     await expect(editor.locator("pre code")).toContainText(
       "const answer = 42;"
     );
+    const beforeModeSwitch = await readFile(dailyPath, "utf8");
+    await page.getByRole("button", { name: "Raw Markdown" }).click();
+    const rawEditor = page.getByRole("textbox", {
+      name: "Raw Markdown editor"
+    });
+    await expect(rawEditor).toHaveValue(beforeModeSwitch);
+    await page.getByRole("button", { name: "Rich editor" }).click();
+    await expect(editor).toBeVisible();
+    expect(await readFile(dailyPath, "utf8")).toBe(beforeModeSwitch);
 
     await editor.click();
     await page.keyboard.press("Control+End");
@@ -309,6 +341,157 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
       page.getByTestId("rich-editor").locator("pre code")
     ).toContainText("const answer = 42;");
 
+    const currentAfterRestart = (await (
+      await fetch(`${restartedUrl}/api/v1/today`)
+    ).json()) as { revision: string };
+    const unsupportedSource = [
+      (await readFile(dailyPath, "utf8"))
+        .replace("aliases: []", "aliases: []\nweather: foggy")
+        .trimEnd(),
+      "",
+      "| Key | Value |",
+      "| --- | --- |",
+      "| mist | high |",
+      "",
+      "$$",
+      "x^2 + y^2",
+      "$$",
+      "",
+      "```mermaid",
+      "graph TD",
+      "  seed --> forest",
+      "```",
+      "",
+      "<section data-kind=\"weather\">Fog</section>",
+      ""
+    ].join("\n");
+    const seedUnsupported = await fetch(
+      `${restartedUrl}/api/v1/daily/${todayPayload.date}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          format: "raw",
+          baseRevision: currentAfterRestart.revision,
+          sourceMarkdown: unsupportedSource
+        })
+      }
+    );
+    expect(seedUnsupported.status).toBe(200);
+    await page.reload();
+
+    const unsupportedRichEditor = page.getByTestId("rich-editor");
+    await expect(unsupportedRichEditor).toBeVisible();
+    await expect(
+      unsupportedRichEditor.locator("[data-opaque-markdown]")
+    ).toHaveCount(4);
+    for (const label of [
+      "Table — edit in Raw Markdown",
+      "Math — edit in Raw Markdown",
+      "Mermaid — edit in Raw Markdown",
+      "HTML — edit in Raw Markdown"
+    ]) {
+      await expect(unsupportedRichEditor).toContainText(label);
+    }
+    await expect(
+      page.getByRole("textbox", { name: "Raw Markdown editor" })
+    ).toHaveCount(0);
+    expect(await readFile(dailyPath, "utf8")).toBe(unsupportedSource);
+
+    const unsupportedContentEditable = unsupportedRichEditor.locator(
+      "[contenteditable='true']"
+    );
+    await unsupportedContentEditable.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Supported rich edit preserves opaque blocks.");
+    await page.keyboard.press("Control+s");
+    await expect
+      .poll(() => readFile(dailyPath, "utf8"))
+      .toContain("Supported rich edit preserves opaque blocks.");
+    const unsupportedAfterRichEdit = await readFile(dailyPath, "utf8");
+    for (const preserved of [
+      "weather: foggy",
+      "| Key | Value |",
+      "$$\nx^2 + y^2\n$$",
+      "```mermaid\ngraph TD\n  seed --> forest\n```",
+      "<section data-kind=\"weather\">Fog</section>"
+    ]) {
+      expect(unsupportedAfterRichEdit).toContain(preserved);
+    }
+
+    await page.getByRole("button", { name: "Raw Markdown" }).click();
+    const protectedRawEditor = page.getByRole("textbox", {
+      name: "Raw Markdown editor"
+    });
+    await expect(protectedRawEditor).toHaveValue(unsupportedAfterRichEdit);
+    await page.getByRole("button", { name: "Rich editor" }).click();
+    await expect(unsupportedRichEditor).toBeVisible();
+    expect(await readFile(dailyPath, "utf8")).toBe(unsupportedAfterRichEdit);
+
+    await page.getByRole("button", { name: "Raw Markdown" }).click();
+    const invalidIdentitySource = unsupportedAfterRichEdit.replace(
+      /^_id: .+$/m,
+      "_id: 11111111-1111-4111-8111-111111111111"
+    );
+    await protectedRawEditor.fill(invalidIdentitySource);
+    await page.keyboard.press("Control+s");
+    await expect(
+      page.getByText("Reserved field '_id' cannot be changed.")
+    ).toBeVisible();
+    await expect(protectedRawEditor).toHaveValue(invalidIdentitySource);
+    expect(await readFile(dailyPath, "utf8")).toBe(unsupportedAfterRichEdit);
+
+    const frontmatterEnd = unsupportedAfterRichEdit.indexOf("\n---\n\n");
+    const validRawEdit = `${unsupportedAfterRichEdit
+      .slice(0, frontmatterEnd + "\n---".length)
+      .replace(
+        "weather: foggy",
+        "weather: rainy"
+      )}\n\n# ${todayPayload.date}\n\nRaw edit survives.\n`;
+    await protectedRawEditor.fill(validRawEdit);
+    await page.keyboard.press("Control+s");
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+    await expect
+      .poll(() => readFile(dailyPath, "utf8"))
+      .toBe(validRawEdit);
+    await page.getByRole("button", { name: "Rich editor" }).click();
+    await expect(page.getByTestId("rich-editor")).toContainText(
+      "Raw edit survives."
+    );
+    expect(await readFile(dailyPath, "utf8")).toBe(validRawEdit);
+    const rawToRichEditor = page
+      .getByTestId("rich-editor")
+      .locator("[contenteditable='true']");
+    await rawToRichEditor.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Rich edit after Raw survives.");
+    await page.keyboard.press("Control+s");
+    await expect
+      .poll(() => readFile(dailyPath, "utf8"))
+      .toContain("Rich edit after Raw survives.");
+    expect(await readFile(dailyPath, "utf8")).toContain("weather: rainy");
+
+    await stopServer(server);
+    server = spawn(fumori, ["serve", "--vault", vault, "--port", "0"], {
+      cwd: temporaryRoot,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const rawRestartedUrl = await waitForFumoriServer(server, {
+      label: "Raw Markdown restarted packed Fumori server",
+      timeoutMs: 20_000
+    });
+    await page.goto(rawRestartedUrl);
+    await expect(page.getByTestId("rich-editor")).toContainText(
+      "Rich edit after Raw survives."
+    );
+    const afterRawToRich = await readFile(dailyPath, "utf8");
+    await page.getByRole("button", { name: "Raw Markdown" }).click();
+    await expect(
+      page.getByRole("textbox", { name: "Raw Markdown editor" })
+    ).toHaveValue(afterRawToRich);
+
     const historicalDate = "2000-01-02";
     const historicalPath = join(
       vault,
@@ -316,7 +499,7 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
       "daily",
       `${historicalDate}.md`
     );
-    await page.goto(`${restartedUrl}/daily/${historicalDate}`);
+    await page.goto(`${rawRestartedUrl}/daily/${historicalDate}`);
     await expect(page.getByText("No Daily Note for this day")).toBeVisible();
     await expect(page.getByTestId("rich-editor")).toHaveCount(0);
     await expect(readFile(historicalPath, "utf8")).rejects.toMatchObject({
@@ -329,7 +512,9 @@ test("the packed CLI edits canonical Daily Notes through Chromium", async ({
     );
     await context.close();
   } finally {
-    server?.kill("SIGTERM");
+    if (server) {
+      await stopServer(server);
+    }
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });

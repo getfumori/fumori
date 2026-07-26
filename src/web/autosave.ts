@@ -3,9 +3,13 @@ export type AutosaveClock = {
   clearTimeout(id: unknown): void;
 };
 
+export type AutosaveDraft =
+  | { format: "rich"; bodyMarkdown: string }
+  | { format: "raw"; sourceMarkdown: string };
+
 type SaveInput = {
   baseRevision: string | null;
-  bodyMarkdown: string;
+  draft: AutosaveDraft;
   keepalive: boolean;
 };
 
@@ -20,7 +24,7 @@ type AutosaveOptions = {
 };
 
 export type AutosaveController = {
-  change(bodyMarkdown: string): void;
+  change(draft: AutosaveDraft): void;
   flush(options?: { keepalive?: boolean }): Promise<void>;
   isDirty(): boolean;
 };
@@ -28,7 +32,7 @@ export type AutosaveController = {
 export function createAutosaveController(
   options: AutosaveOptions
 ): AutosaveController {
-  let bodyMarkdown = "";
+  let draft: AutosaveDraft | undefined;
   let debounceTimer: unknown;
   let maxDirtyTimer: unknown;
   let dirty = false;
@@ -54,9 +58,12 @@ export function createAutosaveController(
     clearDebounce();
     clearMaxDirty();
     const savingVersion = changeVersion;
+    if (!draft) {
+      return;
+    }
     const result = await options.save({
       baseRevision: revision,
-      bodyMarkdown,
+      draft,
       keepalive
     });
     revision = result.revision;
@@ -84,8 +91,8 @@ export function createAutosaveController(
   };
 
   return {
-    change(nextBodyMarkdown) {
-      bodyMarkdown = nextBodyMarkdown;
+    change(nextDraft) {
+      draft = nextDraft;
       changeVersion += 1;
       if (maxDirtyTimer === undefined) {
         maxDirtyTimer = options.clock.setTimeout(() => {

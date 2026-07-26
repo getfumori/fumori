@@ -14,14 +14,18 @@ import {
   type DailyNoteResponse,
   dailyNoteResponseSchema
 } from "../contracts/daily-note";
+import RawMarkdownEditor from "./RawMarkdownEditor.vue";
 import RichMarkdownEditor from "./RichMarkdownEditor.vue";
 import {
   type AutosaveController,
+  type AutosaveDraft,
   createAutosaveController,
   systemAutosaveClock
 } from "./autosave";
+import { isRichMarkdownRoundTripSafe } from "./foundation-markdown";
 
 type SaveStatus = "ready" | "dirty" | "saving" | "saved" | "error";
+type EditorMode = "rich" | "raw" | "protected";
 
 const routeMatch = window.location.pathname.match(
   /^\/daily\/(\d{4}-\d{2}-\d{2})$/
@@ -35,6 +39,9 @@ const fatalError = ref<string>();
 const saveError = ref<string>();
 const saveStatus = ref<SaveStatus>("ready");
 const autosave = ref<AutosaveController>();
+const editorMode = ref<EditorMode>("rich");
+const richEditorSafe = ref(true);
+const rawDraft = ref("");
 
 const displayTitle = computed(() =>
   isTodayRoute ? "Today" : (note.value?.date ?? historicalDate ?? "")
@@ -100,31 +107,41 @@ function configureAutosave(currentNote: DailyNoteResponse): void {
     clock: systemAutosaveClock,
     initialRevision: currentNote.revision,
     policy: config.value.autosave,
-    async save({ baseRevision, bodyMarkdown, keepalive }) {
+    async save({ baseRevision, draft, keepalive }) {
       saveStatus.value = "saving";
       saveError.value = undefined;
       try {
         const response = await fetch(`/api/v1/daily/${currentNote.date}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ baseRevision, bodyMarkdown }),
+          body: JSON.stringify({ baseRevision, ...draft }),
           keepalive
         });
         if (!response.ok) {
           const detail = (await response.json().catch(() => undefined)) as
-            | { error?: string }
+            | { error?: string; message?: string }
             | undefined;
           throw new Error(
             detail?.error === "stale_revision"
               ? "This Daily Note changed elsewhere. Reload before saving again."
-              : `Save failed (${response.status})`
+              : (detail?.message ?? `Save failed (${response.status})`)
           );
         }
         const saved = dailyNoteResponseSchema.parse(await response.json());
-        note.value = {
-          ...saved,
-          bodyMarkdown: note.value?.bodyMarkdown ?? saved.bodyMarkdown
-        };
+        if (draft.format === "rich") {
+          note.value = {
+            ...saved,
+            bodyMarkdown: note.value?.bodyMarkdown ?? saved.bodyMarkdown
+          };
+        } else {
+          note.value = saved;
+          if (rawDraft.value === draft.sourceMarkdown) {
+            rawDraft.value = saved.sourceMarkdown!;
+          }
+        }
+        richEditorSafe.value = isRichMarkdownRoundTripSafe(
+          saved.bodyMarkdown
+        );
         saveStatus.value = "saved";
         return { revision: saved.revision! };
       } catch (reason) {
@@ -153,6 +170,11 @@ async function load(): Promise<void> {
     }
     config.value = appConfigSchema.parse(await configResponse.json());
     note.value = dailyNoteResponseSchema.parse(await noteResponse.json());
+    rawDraft.value = note.value.sourceMarkdown ?? "";
+    richEditorSafe.value =
+      !note.value.exists ||
+      isRichMarkdownRoundTripSafe(note.value.bodyMarkdown);
+    editorMode.value = richEditorSafe.value ? "rich" : "protected";
     document.title = `${displayTitle.value} — Fumori`;
     if (isTodayRoute || note.value.exists) {
       configureAutosave(note.value);
@@ -165,14 +187,26 @@ async function load(): Promise<void> {
   }
 }
 
-function updateBody(bodyMarkdown: string): void {
+function markDraftDirty(draft: AutosaveDraft): void {
   if (!note.value || !autosave.value) {
     return;
   }
-  note.value = { ...note.value, bodyMarkdown };
   saveStatus.value = "dirty";
   saveError.value = undefined;
-  autosave.value.change(bodyMarkdown);
+  autosave.value.change(draft);
+}
+
+function updateBody(bodyMarkdown: string): void {
+  if (!note.value) {
+    return;
+  }
+  note.value = { ...note.value, bodyMarkdown };
+  markDraftDirty({ format: "rich", bodyMarkdown });
+}
+
+function updateRawSource(sourceMarkdown: string): void {
+  rawDraft.value = sourceMarkdown;
+  markDraftDirty({ format: "raw", sourceMarkdown });
 }
 
 async function createHistoricalNote(): Promise<void> {
@@ -188,6 +222,9 @@ async function createHistoricalNote(): Promise<void> {
     }
     const created = dailyNoteResponseSchema.parse(await response.json());
     note.value = created;
+    rawDraft.value = created.sourceMarkdown ?? "";
+    richEditorSafe.value = true;
+    editorMode.value = "rich";
     configureAutosave(created);
     saveStatus.value = "saved";
   } catch (reason) {
@@ -197,6 +234,25 @@ async function createHistoricalNote(): Promise<void> {
     );
     saveStatus.value = "error";
   }
+}
+
+async function switchToRaw(): Promise<void> {
+  try {
+    await autosave.value?.flush();
+  } catch {
+    return;
+  }
+  rawDraft.value = note.value?.sourceMarkdown ?? rawDraft.value;
+  editorMode.value = "raw";
+}
+
+async function switchToRich(): Promise<void> {
+  try {
+    await autosave.value?.flush();
+  } catch {
+    return;
+  }
+  editorMode.value = richEditorSafe.value ? "rich" : "protected";
 }
 
 async function navigate(event: MouseEvent, destination: string): Promise<void> {
@@ -378,9 +434,31 @@ onBeforeUnmount(() => {
           <span aria-hidden="true">/</span>
           {{ displayTitle }}
         </div>
-        <div class="save-indicator" :data-save-state="saveStatus" role="status">
-          <span aria-hidden="true"></span>
-          {{ statusLabel }}
+        <div class="document-actions">
+          <button
+            v-if="
+              note &&
+              (note.exists || isTodayRoute) &&
+              editorMode === 'raw'
+            "
+            type="button"
+            class="editor-mode-button"
+            @click="switchToRich"
+          >
+            Rich editor
+          </button>
+          <button
+            v-else-if="note && (note.exists || isTodayRoute)"
+            type="button"
+            class="editor-mode-button"
+            @click="switchToRaw"
+          >
+            {{ editorMode === "protected" ? "Open Raw Markdown" : "Raw Markdown" }}
+          </button>
+          <div class="save-indicator" :data-save-state="saveStatus" role="status">
+            <span aria-hidden="true"></span>
+            {{ statusLabel }}
+          </div>
         </div>
       </header>
 
@@ -413,6 +491,25 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
+        <template v-else-if="editorMode === 'protected'">
+          <div class="protected-markdown">
+            <span class="protected-mark" aria-hidden="true">&lt;/&gt;</span>
+            <p class="eyebrow">Exact-source protection</p>
+            <h2>Protected Markdown</h2>
+            <p>
+              This note contains syntax outside the Foundation rich profile.
+              Open Raw Markdown to inspect or edit it without silent rewriting.
+            </p>
+          </div>
+        </template>
+
+        <template v-else-if="editorMode === 'raw'">
+          <RawMarkdownEditor
+            :model-value="rawDraft"
+            @update="updateRawSource"
+          />
+        </template>
+
         <template v-else>
           <div v-if="!note.exists" class="virtual-banner">
             <strong>No Daily Note yet</strong>
@@ -422,10 +519,10 @@ onBeforeUnmount(() => {
             :model-value="note.bodyMarkdown"
             @update="updateBody"
           />
-          <p v-if="saveError" class="save-error" role="alert">
-            {{ saveError }}
-          </p>
         </template>
+        <p v-if="saveError" class="save-error" role="alert">
+          {{ saveError }}
+        </p>
       </section>
     </article>
   </main>
